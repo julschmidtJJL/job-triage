@@ -6,6 +6,8 @@ A daily pipeline that reads job boards so you don't have to, scores every postin
 
 It runs on GitHub Actions once a day. No server, no database.
 
+It is extracted from the private pipeline that has run my own job search every day since 14 October 2026. That pipeline grew out of an earlier version I built in May and June 2026 for a family member's search. The history stays private because it holds personal profile notes.
+
 ## Quick start
 
 Paste this into Claude Code. It works the same in Codex or Cursor.
