@@ -1,0 +1,11 @@
+anthropic>=1.13,<2
+pydantic>=2
+python-dotenv
+requests
+httpx
+beautifulsoup4
+lxml
+notion-client>=2.0.0,<3.0.0
+thefuzz
+python-levenshtein
+pytest

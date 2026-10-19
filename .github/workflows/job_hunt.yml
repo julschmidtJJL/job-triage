@@ -1,0 +1,88 @@
+name: Job Hunt Pipeline
+
+on:
+  schedule:
+    # 05:17 UTC = 07:17 CEST / 06:17 CET. Off the full hour on purpose: GitHub
+    # delays scheduled runs most at the top of the hour (the 06:00 run on
+    # 15 Oct started at 11:11).
+    - cron: '17 5 * * *'
+  workflow_dispatch:      # allow manual trigger from the GitHub UI
+    inputs:
+      send_report:
+        description: 'Send the weekly report email now (it goes out on Mondays anyway)'
+        type: boolean
+        default: false
+
+jobs:
+  run-pipeline:
+    # Scheduled runs only start once you set the repository variable
+    # JOBHUNT_ENABLED=true (Settings → Secrets and variables → Actions →
+    # Variables), so a fresh fork doesn't fail every morning without keys.
+    # A manual run from the Actions tab always starts.
+    if: github.event_name == 'workflow_dispatch' || vars.JOBHUNT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Cross-run state without a database: every file the pipeline learns
+      # from lives in data/ and rides along in the Actions cache. The key is
+      # unique per run, so each run saves a fresh copy; restore-keys picks the
+      # latest one. A daily job never reaches the 7-day eviction window.
+      - name: Restore pipeline state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/jobs_seen_urls.json
+            data/learned_stoplist.json
+            data/holdover_queue.json
+            data/decision_history.json
+            data/query_stats.json
+          key: pipeline-state-${{ github.run_id }}
+          restore-keys: |
+            pipeline-state-
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_JOB_BOARD_DB_ID: ${{ secrets.NOTION_JOB_BOARD_DB_ID }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          FIT_PROFILE: ${{ secrets.FIT_PROFILE }}
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SEND_REPORT: ${{ inputs.send_report }}
+        run: python main.py
+
+      # Only after a successful run: a failed run (no scoring, no delivery)
+      # must not mark its jobs as seen, so the next run retries them.
+      - name: Save pipeline state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/jobs_seen_urls.json
+            data/learned_stoplist.json
+            data/holdover_queue.json
+            data/decision_history.json
+            data/query_stats.json
+          key: pipeline-state-${{ github.run_id }}
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14

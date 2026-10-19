@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Private: the fit profile is distilled from personal notes and mail
+profile/profile.md
+
+# Runtime state and output (cached across Actions runs, never committed)
+data/
+logs/
+
+# Python / tooling
+__pycache__/
+*.py[co]
+.venv/
+venv/
+.pytest_cache/
+.idea/
+.gstack/
+.DS_Store

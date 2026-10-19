@@ -1,0 +1,85 @@
+{
+  "_comment": "Search queries are the experiment. Toggle `active`, add or remove queries, and watch the per-query scoreboard in the run summary. `role_terms` is the Tier-1 prefilter: a job must mention one of them (title or description) to reach the LLM scorer.",
+  "queries": [
+    {
+      "q": "KI Manager",
+      "active": true
+    },
+    {
+      "q": "KI Projektleiter",
+      "active": true
+    },
+    {
+      "q": "AI Engineer",
+      "active": true
+    },
+    {
+      "q": "AI Solutions Engineer",
+      "active": true
+    },
+    {
+      "q": "Forward Deployed Engineer",
+      "active": true
+    },
+    {
+      "q": "Data Engineer",
+      "active": true
+    },
+    {
+      "q": "Digitalisierung",
+      "active": true
+    },
+    {
+      "q": "Prozessautomatisierung",
+      "active": true
+    },
+    {
+      "q": "Innovationsmanager",
+      "active": true
+    },
+    {
+      "q": "Inhouse Consultant KI",
+      "active": true
+    },
+    {
+      "q": "Digitalisierungsmanager",
+      "active": true
+    },
+    {
+      "q": "IT-Projektleiter",
+      "active": true
+    },
+    {
+      "q": "Referent Geschäftsführung",
+      "active": true
+    },
+    {
+      "q": "Prozessmanager",
+      "active": true
+    }
+  ],
+  "role_terms": [
+    "ki",
+    "ai",
+    "künstliche intelligenz",
+    "artificial intelligence",
+    "machine learning",
+    "llm",
+    "genai",
+    "generative",
+    "data",
+    "daten",
+    "analytics",
+    "automatisierung",
+    "automation",
+    "digitalisierung",
+    "digital",
+    "innovation",
+    "python",
+    "forward deployed",
+    "solutions engineer",
+    "projektleit",
+    "prozessmanag",
+    "geschäftsführung"
+  ]
+}
