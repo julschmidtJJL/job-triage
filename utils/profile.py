@@ -18,6 +18,9 @@ PROFILE_DIR = Path(__file__).parent.parent / "profile"
 QUERIES_FILE = PROFILE_DIR / "queries.json"
 PROFILE_FILE = PROFILE_DIR / "profile.md"
 PROFILE_ENV = "FIT_PROFILE"
+# The facts a cover letter may state (scripts/draft_letters.py). Private, like the profile.
+LETTER_FACTS_FILE = PROFILE_DIR / "letter_facts.md"
+LETTER_FACTS_ENV = "LETTER_FACTS"
 
 
 def load_search_config(path: Path = QUERIES_FILE) -> dict:
@@ -35,15 +38,20 @@ def active_queries(config: dict) -> list[str]:
     return [q["q"] for q in config.get("queries", []) if q.get("active", True)]
 
 
-def load_profile_text(path: Path = PROFILE_FILE) -> str:
+def load_profile_text(path: Path = PROFILE_FILE, env: str = PROFILE_ENV) -> str:
     """The fit profile as plain text. Env var wins over the local file.
     Returns "" if neither exists — the caller decides how to degrade."""
-    from_env = os.environ.get(PROFILE_ENV, "").strip()
+    from_env = os.environ.get(env, "").strip()
     if from_env:
         return from_env
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
     return ""
+
+
+def load_letter_facts(path: Path = LETTER_FACTS_FILE) -> str:
+    """The cover-letter facts: LETTER_FACTS env var, else profile/letter_facts.md."""
+    return load_profile_text(path, LETTER_FACTS_ENV)
 
 
 def _term_pattern(term: str) -> re.Pattern:

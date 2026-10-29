@@ -10,6 +10,18 @@ for a reader who knows nothing about you. Two to three pages is plenty.
 ## How I work / strengths
 - What people come to you for. What you do better than the job title suggests.
 
+## What counts as a fit
+Optional. Three to five questions you would ask about any offer. When this section
+exists, Claude scores mainly on how a role answers them, whatever its title: a
+title is neither a fit nor an anti-fit on its own. For example:
+
+1. **What would I learn?** A skill, an industry or a way of running a company that
+   is new to me, and how fast.
+2. **What would I own?** A problem end to end, or a slice of someone else's.
+3. **Who would I work with?** How far from the people who decide, and whether there
+   is someone to learn from.
+4. **Does it meet the hard constraints?** Pay floor, hours, location (see below).
+
 ## Situations that fit
 - The company's situation matters more than its industry. For example: a company
   without AI in use that wants its first person to build with it, close to management.

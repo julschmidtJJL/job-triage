@@ -251,3 +251,109 @@ def test_same_title_at_another_company_is_not_a_duplicate():
             with patch("notion_sync.sync.time.sleep"):
                 result = sync_jobs([{**SAMPLE_JOB, "title": "Data Engineer", "url": "https://linkedin.com/jobs/2"}])
     assert result["added"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Full ad and what it says
+# ---------------------------------------------------------------------------
+
+from notion_sync.sync import AD_PROPERTIES, _build_children, ensure_ad_properties
+
+AD_JOB = {
+    **SAMPLE_JOB,
+    "scoring_method": "claude",
+    "fetch_method": "full_jd",
+    "description": "Über uns\n\nWir bauen.\n\n" + ("Aufgaben. " * 400),
+    "ad_language": "German",
+    "contact_person": "Anna Beispiel, Leiterin Personal",
+    "seniority": "Mid",
+    "required_years": 3,
+    "hard_requirements": ["3+ years construction-site experience", "Bauingenieur degree"],
+    "requirements_flexible": False,
+    "unmet_requirements": ["3+ years construction-site experience"],
+}
+
+
+def _text(prop):
+    return prop["rich_text"][0]["text"]["content"]
+
+
+def test_ad_facts_become_properties():
+    props = _build_properties(AD_JOB)
+    assert _text(props["Contact Person"]) == "Anna Beispiel, Leiterin Personal"
+    assert props["Ad Language"] == {"select": {"name": "German"}}
+    assert props["Seniority"] == {"select": {"name": "Mid"}}
+    assert props["Required Years"] == {"number": 3}
+    assert _text(props["Hard Requirements"]) == "3+ years construction-site experience; Bauingenieur degree"
+    assert _text(props["Unmet Requirements"]) == "3+ years construction-site experience"
+    assert props["Requirements Flexible"] == {"checkbox": False}
+
+
+def test_empty_ad_facts_are_left_out():
+    props = _build_properties({**SAMPLE_JOB, "scoring_method": "keyword_fallback"})
+    assert not set(AD_PROPERTIES) & set(props)
+
+
+def test_properties_the_board_lacks_are_left_out():
+    props = _build_properties(AD_JOB, ad_properties={"Ad Language"})
+    assert "Ad Language" in props and "Contact Person" not in props
+    assert "Job Title" in props  # the existing properties are untouched
+
+
+def test_page_body_carries_requirements_and_the_full_ad():
+    blocks = _build_children(AD_JOB)
+    texts = [b[b["type"]]["rich_text"][0]["text"]["content"] for b in blocks if b["type"] != "divider"]
+    assert "Requirements" in texts and "Job Ad" in texts
+    requirements = texts[texts.index("Requirements") + 1]
+    assert "Not met: 3+ years construction-site experience" in requirements
+    assert "Contact: Anna Beispiel" in requirements
+    ad = texts[texts.index("Job Ad") + 1:]
+    assert ad[0].startswith("Über uns\n\nWir bauen.")
+    assert all(len(t) <= 2000 for t in ad)
+    assert "".join(ad).replace("\n", "").replace(" ", "") == AD_JOB["description"].replace("\n", "").replace(" ", "")
+    assert len(blocks) <= 100
+
+
+def test_snippet_rows_say_so():
+    blocks = _build_children({**SAMPLE_JOB, "fetch_method": "snippet"})
+    headings = [b["heading_3"]["rich_text"][0]["text"]["content"] for b in blocks if b["type"] == "heading_3"]
+    assert "Job Ad (search snippet only)" in headings
+
+
+def test_ensure_ad_properties_adds_only_the_missing_ones():
+    notion = MagicMock()
+    notion.data_sources.retrieve.return_value = {"properties": {"Job Title": {}, "Ad Language": {}}}
+    assert ensure_ad_properties(notion, "ds") == set(AD_PROPERTIES)
+    added = notion.data_sources.update.call_args.kwargs["properties"]
+    assert "Ad Language" not in added
+    assert added["Required Years"] == {"number": {}} and added["Requirements Flexible"] == {"checkbox": {}}
+
+
+def test_ensure_ad_properties_is_a_no_op_when_complete():
+    notion = MagicMock()
+    notion.data_sources.retrieve.return_value = {"properties": dict.fromkeys(AD_PROPERTIES, {})}
+    assert ensure_ad_properties(notion, "ds") == set(AD_PROPERTIES)
+    notion.data_sources.update.assert_not_called()
+
+
+def test_rows_still_sync_when_the_schema_cannot_be_changed(capsys):
+    notion = _make_mock_notion()
+    notion.data_sources.retrieve.return_value = {"properties": {"Ad Language": {}}}
+    notion.data_sources.update.side_effect = Exception("insufficient permissions")
+    with patch.dict("os.environ", ENV), \
+         patch("notion_sync.sync.Client", return_value=notion), \
+         patch("notion_sync.sync.time.sleep"):
+        result = sync_jobs([AD_JOB])
+    assert result["added"] == 1
+    props = notion.pages.create.call_args.kwargs["properties"]
+    assert "Ad Language" in props and "Contact Person" not in props
+    assert "Could not add Notion properties" in capsys.readouterr().out
+
+
+def test_tool_gaps_are_shown_but_not_as_unmet():
+    blocks = _build_children({**AD_JOB, "unmet_requirements": [], "tool_gaps": ["Azure AI"]})
+    texts = [b[b["type"]]["rich_text"][0]["text"]["content"] for b in blocks if b["type"] != "divider"]
+    requirements = texts[texts.index("Requirements") + 1]
+    assert "Tools the profile does not list (not counted against the fit): Azure AI" in requirements
+    assert "Not met" not in requirements
+    assert "Unmet Requirements" not in _build_properties({**AD_JOB, "unmet_requirements": []})
