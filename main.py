@@ -8,8 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from notion_sync.feedback import PIPELINE, fetch_decisions_from_env
-from notion_sync.sync import sync_auto_dropped, sync_jobs
+from job_board import board_label, fetch_decisions_from_env, sync_auto_dropped, sync_jobs
+from notion_sync.feedback import PIPELINE
 from scrapers.arbeitsagentur import scrape_arbeitsagentur
 from scrapers.digital_rapids import scrape_digital_rapids
 from scrapers.good_jobs import scrape_good_jobs
@@ -165,7 +165,7 @@ def run_failures(scored_jobs: list, profile_text: str, threshold: int, sync_resu
     if profile_text and tier2 and not any(j.get("scoring_method") == "claude" for j in scored_jobs):
         reasons.append(f"Claude scored none of the {len(tier2)} jobs that passed the prefilter")
     if sync_result and sync_result.get("failed") and not sync_result.get("added"):
-        reasons.append(f"Notion rejected all {sync_result['failed']} uploads")
+        reasons.append(f"{board_label()} rejected all {sync_result['failed']} uploads")
     return reasons
 
 
@@ -243,7 +243,7 @@ def run_pipeline(dry_run: bool = False):
 
     # Step 1: load stoplist (auto-recovers from JSON corruption)
     stoplist = load_stoplist()
-    # Step 2: read decisions from Notion (90d lookback, stale-cache fallback)
+    # Step 2: read decisions from the board (90d lookback; Notion falls back to a stale cache)
     history = fetch_decisions_from_env()
     log.info(
         "[FEEDBACK] %d decisions loaded (applied=%d interested=%d rejected=%d declined=%d rescued=%d source=%s)",
@@ -293,7 +293,7 @@ def run_pipeline(dry_run: bool = False):
     if expired:
         print(f"[INFO] {len(expired)} jobs dropped after 3 runs without making the top-N cut")
         log.info("[FEEDBACK] holdover expired: %d jobs", len(expired))
-    print(f"[CAP] Top-N={top_n}: {len(top_jobs)} jobs for Notion, {len(new_holdover)} in holdover")
+    print(f"[CAP] Top-N={top_n}: {len(top_jobs)} jobs for the board, {len(new_holdover)} in holdover")
 
     output_file = DATA_DIR / f"new_jobs_{date.today()}.json"
     DATA_DIR.mkdir(exist_ok=True)
@@ -309,14 +309,15 @@ def run_pipeline(dry_run: bool = False):
     auto_drop_added = 0
     sync_added = 0
     sync_result = None
+    target = board_label()
     if dry_run:
-        print("[DRY-RUN] Notion upload skipped")
-        log.info("[INFO] Dry run: Notion upload skipped")
+        print(f"[DRY-RUN] {target} upload skipped")
+        log.info("[INFO] Dry run: %s upload skipped", target)
     else:
-        # Step 10: sync top-N to Notion as New
+        # Step 10: sync top-N to the board as New
         sync_result = sync_jobs(top_jobs)
         sync_added = sync_result["added"]
-        print(f"[SYNC] Notion: {sync_result['added']} added, {sync_result['skipped']} skipped (duplicates)")
+        print(f"[SYNC] {target}: {sync_result['added']} added, {sync_result['skipped']} skipped (duplicates)")
         if sync_result.get("failed_jobs"):
             # Failed uploads go back into the holdover queue so the next run
             # retries them; they count toward the same 3-run expiry.
@@ -324,11 +325,11 @@ def run_pipeline(dry_run: bool = False):
             new_holdover = retry + new_holdover
             save_holdover(new_holdover)
             print(f"[SYNC] {len(retry)} failed uploads moved to the holdover queue for the next run")
-        log.info("[OK] Notion sync: %d added, %d skipped", sync_result["added"], sync_result["skipped"])
+        log.info("[OK] %s sync: %d added, %d skipped", target, sync_result["added"], sync_result["skipped"])
         # Step 11: sync auto-dropped (NOT in shadow mode — only real drops)
         if not shadow and drop_log:
             auto_drop_added = sync_auto_dropped(drop_log)["added"]
-            print(f"[AUTO-DROP] {auto_drop_added} Auto-Dropped rows created in Notion")
+            print(f"[AUTO-DROP] {auto_drop_added} Auto-Dropped rows created in {target}")
             log.info("[FEEDBACK] auto-dropped synced: %d", auto_drop_added)
 
     # Step 12: harden stop-list (respects the allow-list from step 3, so a
@@ -344,7 +345,7 @@ def run_pipeline(dry_run: bool = False):
     save_stats(stats)
     board = scoreboard(stats, history, config["queries"])
     stale = stale_queries(board)
-    print("\n[QUERIES] Last 28 days (found / new / passed prefilter / avg score / positives in Notion)")
+    print("\n[QUERIES] Last 28 days (found / new / passed prefilter / avg score / positives on the board)")
     print(format_scoreboard(board))
     if stale:
         print(f"[QUERIES] No yield after 21+ days, consider turning off: {', '.join(stale)}")
@@ -391,7 +392,7 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Job hunt pipeline")
-    parser.add_argument("--dry-run", action="store_true", help="Run the pipeline without uploading to Notion")
+    parser.add_argument("--dry-run", action="store_true", help="Run the pipeline without writing to the board")
     args = parser.parse_args()
     try:
         run_pipeline(dry_run=args.dry_run)

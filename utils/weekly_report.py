@@ -79,7 +79,7 @@ def build_weekly_report(
     db_id = os.environ.get("NOTION_JOB_BOARD_DB_ID", "").replace("-", "").strip()
     board_url = f"https://www.notion.so/{db_id}" if db_id else ""
 
-    decision_line = ", ".join(f"{v} {k}" for k, v in decisions.items()) if decisions else "no Notion data"
+    decision_line = ", ".join(f"{v} {k}" for k, v in decisions.items()) if decisions else "none on the board"
     text = [
         f"jobhunt weekly report, {today.isoformat()}",
         "",
@@ -106,7 +106,7 @@ def build_weekly_report(
         f"Your decisions this week: {html.escape(decision_line)}.</p>",
         "<h3>Queries, last 7 days</h3>", _html_table(week),
         "<h3>Queries, last 28 days</h3>", _html_table(month),
-        "<p class='note'>found / new / passed prefilter / average score / positives in Notion</p>",
+        "<p class='note'>found / new / passed prefilter / average score / positives on the board</p>",
     ]
     if stale:
         parts.append(f"<p><b>No yield after 21+ days</b>, consider turning off: {html.escape(', '.join(stale))}</p>")
