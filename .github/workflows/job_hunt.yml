@@ -38,6 +38,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # BOARD=csv commits your job board to this repository (last step):
+      # stop before any work if the repository is public.
+      - name: Check the board can be committed
+        if: ${{ vars.BOARD == 'csv' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" != "true" ]; then
+            echo "::error::BOARD=csv commits your job board to this repository. Make it private first."
+            exit 1
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

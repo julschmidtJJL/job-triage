@@ -97,14 +97,14 @@ The board is where scored jobs land and where you give your verdicts. Two ship, 
 | Each job | a database row | a row in `board/jobs.csv` |
 | Assessment, requirements, full ad | the row's page | `board/ads/<key>.md` |
 | Your verdict | the Decision select | typed into the Decision column |
-| Cover letters | a child page "Anschreiben – <Company>" | `board/letters/<company>.md` |
+| Cover letters | a child page "Anschreiben – <Company>" | `board/letters/<Key>.md` |
 
 **The spreadsheet board** has the Notion board's columns, plus Added, Decided and a Key that names the row's ad file. Open `board/jobs.csv` in Excel, Numbers or LibreOffice, type a Decision (New, Interesting, Maybe, Apply, Applied, Not interesting, Declined; case doesn't matter) and save it as CSV.
 
 - **Your edits survive.** Each run reads the file first and only appends jobs it doesn't have yet, matched by URL or by title and company, so your Decisions, your own extra columns and your column order stay as you left them.
 - **The one cell it fills in** is an empty Decided, with the date it first sees your Decision. The 90-day learning window and the Monday report count from that date.
 - **Excel is fine.** A German Excel saves with semicolons and sometimes in Windows-1252; the file is read the way it was saved and written back with the same separator, in UTF-8. Close it before a local run: Excel on Windows locks an open file, and the run then puts its new jobs back in the holdover queue for the next day.
-- **One letter per company.** An existing `board/letters/<company>.md` counts as a letter, drafted or written by you, so it is never overwritten. A second Apply row at the same company waits until you rename the file.
+- **One letter per row.** A letter is named after the row's Key, which starts with the company (`board/letters/nordhafen-logistik-gmbh-disponent-e25e26.md`). An existing file counts as a letter, drafted or written by you, so it is never overwritten; to write your own, save it under the row's Key.
 
 `board/` is gitignored. On GitHub Actions, set the repository variable `BOARD` to `csv`: each run commits `board/` back to your repository, so you pull to see new jobs and push your Decisions. If you push while a run is going, a merge driver keeps your cells and the run's new rows. **Use a private repository only**, the same as for the logs: the board names every job you looked at and what you decided, and the workflow refuses to commit it to a public repository.
 
@@ -171,7 +171,7 @@ Actions logs of a public repository are public, and they name the jobs on your b
 
 ### Cover letters
 
-`scripts/draft_letters.py` drafts a base cover letter for each row with Decision **Apply** that has no letter yet. It reads the full ad stored with the row (the Requirements and Job Ad sections, Hard and Unmet Requirements, Contact Person), writes in the row's Ad Language against the fit profile and your letter facts, and puts the letter on the board. On Notion it is a child page "Anschreiben – <Company>", and any child page whose title starts with "Anschreiben" counts as a letter; on the spreadsheet board it is `board/letters/<company>.md`, and an existing file counts. Either way a letter you wrote yourself is never overwritten. A row with only a search snippet is skipped.
+`scripts/draft_letters.py` drafts a base cover letter for each row with Decision **Apply** that has no letter yet. It reads the full ad stored with the row (the Requirements and Job Ad sections, Hard and Unmet Requirements, Contact Person), writes in the row's Ad Language against the fit profile and your letter facts, and puts the letter on the board. On Notion it is a child page "Anschreiben – <Company>", and any child page whose title starts with "Anschreiben" counts as a letter; on the spreadsheet board it is `board/letters/<Key>.md`, and an existing file counts. Either way a letter you wrote yourself is never overwritten. A row with only a search snippet is skipped.
 
 The letter facts (`profile/letter_facts.md`, shape in `profile/letter_facts.example.md`) are the only facts a letter may state about you. Their "Letter frame" gives the name and city for the signature and date line, and any phrase you put in backticks under "Never write" is checked in every draft. The letter opens with `[Warum <Company>, in Ihren eigenen Worten.]` (or `[Why <Company>, in your own words.]`) and leaves the start date as `[Datum]` (`[Start date]`): both stay yours. The company website is not checked.
 

@@ -214,7 +214,7 @@ def test_an_existing_letter_file_means_the_row_is_skipped(board):
     _set_decision(board, key, "Apply")
     _, todo, _ = board.letter_rows()
     path = board.add_letter(todo[0], _letter())
-    assert Path(path) == board.letters_dir / "nordhafen-logistik-gmbh.md"
+    assert Path(path) == board.letters_dir / f"{key}.md"
     text = Path(path).read_text(encoding="utf-8")
     assert text.startswith("# Anschreiben – Nordhafen Logistik GmbH\n\n> Odds: fair.")
     assert text.endswith("Mit freundlichen Grüßen\n\nErika Beispiel\n")
@@ -222,9 +222,20 @@ def test_an_existing_letter_file_means_the_row_is_skipped(board):
     # Drafted here or written by hand: either way, never a second one.
     _, todo, skipped = board.letter_rows()
     assert todo == []
-    assert skipped[0][1].startswith("already has a letter (board/letters/nordhafen-logistik-gmbh.md)")
+    assert skipped[0][1] == f"already has a letter (board/letters/{key}.md)"
     with pytest.raises(ValueError, match="not writing a second"):
         board.add_letter(skipped[0][0], _letter())
+
+
+def test_two_roles_at_one_company_get_a_letter_each(board):
+    board.sync_jobs([_job(), _job(title="Lagerleiter", url="https://example.com/2")])
+    for row in read_table(board.jobs_file)[2]:
+        _set_decision(board, row["Key"], "Apply")
+    _, todo, _ = board.letter_rows()
+    board.add_letter(todo[0], _letter())
+    _, todo, skipped = board.letter_rows()
+    assert [r["title"] for r in todo] == ["Lagerleiter"]
+    assert [r["title"] for r, _ in skipped] == ["Disponent (m/w/d)"]
 
 
 def test_a_snippet_only_row_gets_no_letter(board):
@@ -265,7 +276,7 @@ def test_the_letter_script_writes_to_the_csv_board(board, monkeypatch, tmp_path)
     assert draft_letters.main(["--dry-run"]) == 0
     assert not board.letters_dir.exists()
     assert draft_letters.main([]) == 0
-    letter = (board.letters_dir / "nordhafen-logistik-gmbh.md").read_text(encoding="utf-8")
+    letter = next(board.letters_dir.glob("nordhafen-logistik-gmbh-disponent-*.md")).read_text(encoding="utf-8")
     assert "[Warum Nordhafen Logistik GmbH, in Ihren eigenen Worten.] Ich bringe Erfahrung mit." in letter
     assert letter.endswith("Erika Beispiel\n")
     assert draft_letters.main([]) == 0  # second run: the file is there, nothing to draft

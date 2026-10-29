@@ -225,8 +225,8 @@ Ask them to mark a few rows and save: that's how it learns.
 
 Only if they want them. A row they mark **Apply** then gets a draft letter,
 from the full ad stored with the row and a facts file they control: a child
-page of the row on Notion, `board/letters/<company>.md` on the spreadsheet
-board (one per company; an existing file is never overwritten).
+page of the row on Notion, `board/letters/<Key>.md` on the spreadsheet
+board (named after the row's Key; an existing file is never overwritten).
 
 ```bash
 cp profile/letter_facts.example.md profile/letter_facts.md

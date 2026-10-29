@@ -3,8 +3,8 @@
     board/jobs.csv               one row per job, the Notion board's columns;
                                  you type the Decision
     board/ads/<key>.md           what the scorer read: assessment, requirements, full ad
-    board/letters/<company>.md   a cover-letter draft; an existing file means the
-                                 company has a letter, so it is never drafted twice
+    board/letters/<key>.md       a cover-letter draft; an existing file means the
+                                 row has a letter, so it is never drafted twice
 
 Every write reads jobs.csv first, appends the jobs it doesn't have yet (matched
 by URL or by title + company, like Notion) and leaves the rest as you left it:
@@ -199,7 +199,7 @@ def ad_sections(text: str) -> dict[str, str]:
     current = None
     for line in text.splitlines():
         heading = re.match(r"^##\s+(.+?)\s*$", line)
-        if heading and current != "Job Ad":
+        if heading and not (current or "").startswith("Job Ad"):
             current = heading.group(1)
             sections[current] = []
         elif current:
@@ -319,8 +319,10 @@ class CsvBoard:
             ))
         return history
 
-    def letter_file(self, company: str) -> Path:
-        return self.letters_dir / f"{slug(company) or 'company'}.md"
+    def letter_file(self, key: str) -> Path:
+        """Named after the row's Key, which starts with the company: one letter
+        per row, like the Notion child page, even for two roles at one company."""
+        return self.letters_dir / f"{key}.md"
 
     def _row_facts(self, row: dict) -> dict:
         try:
@@ -359,7 +361,7 @@ class CsvBoard:
             if not row["company"]:
                 skipped.append((row, "no company on the row"))
                 continue
-            letter = self.letter_file(row["company"])
+            letter = self.letter_file(row["row_id"])
             if letter.exists():
                 skipped.append((row, f"already has a letter ({letter.relative_to(self.root.parent)})"))
                 continue
@@ -377,7 +379,7 @@ class CsvBoard:
         return len(picked), todo, skipped
 
     def add_letter(self, row: dict, page: LetterPage) -> str:
-        path = self.letter_file(row["company"])
+        path = self.letter_file(row["row_id"])
         if path.exists():
             raise ValueError(f"{path.name} appeared during this run; not writing a second")
         path.parent.mkdir(parents=True, exist_ok=True)

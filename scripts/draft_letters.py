@@ -5,7 +5,7 @@ stored with the row (the Requirements and Job Ad sections, Hard Requirements,
 Unmet Requirements, Contact Person, Ad Language), draft a letter in the ad's
 language against the fit profile and the letter facts, and put it on the board.
 On Notion (BOARD=notion, the default) it is a child page "Anschreiben – <Company>"
-of the row; with BOARD=csv it is board/letters/<company>.md. A short note above
+of the row; with BOARD=csv it is board/letters/<Key>.md. A short note above
 the letter gives the honest odds and which ad bullets the letter covers and which
 it doesn't.
 
