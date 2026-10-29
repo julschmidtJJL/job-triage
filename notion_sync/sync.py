@@ -70,6 +70,38 @@ def _get_existing_urls(notion: Client, ds_id: str) -> set:
     return _get_existing(notion, ds_id)[0]
 
 
+# Read from the full ad (utils/pipeline.py). Added to the data source on the
+# first sync that misses them; rows still sync without them if that fails.
+AD_PROPERTIES = {
+    "Contact Person": {"rich_text": {}},
+    "Ad Language": {"select": {}},
+    "Seniority": {"select": {}},
+    "Required Years": {"number": {}},
+    "Hard Requirements": {"rich_text": {}},
+    "Requirements Flexible": {"checkbox": {}},
+    "Unmet Requirements": {"rich_text": {}},
+}
+
+
+def ensure_ad_properties(notion: Client, ds_id: str) -> set:
+    """Add the AD_PROPERTIES missing from the data source; return those it has."""
+    try:
+        existing = set(notion.data_sources.retrieve(ds_id).get("properties", {}))
+    except Exception as e:
+        print(f"[WARN] Could not read the Notion schema: {e}")
+        return set()
+    missing = {name: spec for name, spec in AD_PROPERTIES.items() if name not in existing}
+    if not missing:
+        return set(AD_PROPERTIES)
+    try:
+        notion.data_sources.update(ds_id, properties=missing)
+        print(f"[INFO] Notion schema: added {', '.join(missing)}")
+        return set(AD_PROPERTIES)
+    except Exception as e:
+        print(f"[WARN] Could not add Notion properties {', '.join(missing)}: {e}")
+        return set(AD_PROPERTIES) & existing
+
+
 def _option(name: str) -> str:
     """Notion select and multi-select options may not contain commas and are
     capped at 100 characters. Claude's skill names sometimes have commas
@@ -77,7 +109,31 @@ def _option(name: str) -> str:
     return name.replace(",", " /").strip()[:100]
 
 
-def _build_properties(job: dict) -> dict:
+def _rich(text: str) -> dict:
+    return {"rich_text": [{"text": {"content": text[:2000]}}]}
+
+
+def _ad_properties(job: dict) -> dict:
+    props: dict = {}
+    if job.get("contact_person"):
+        props["Contact Person"] = _rich(job["contact_person"])
+    if job.get("ad_language"):
+        props["Ad Language"] = {"select": {"name": _option(job["ad_language"])}}
+    if job.get("seniority"):
+        props["Seniority"] = {"select": {"name": _option(job["seniority"])}}
+    if job.get("required_years") is not None:
+        props["Required Years"] = {"number": job["required_years"]}
+    if job.get("hard_requirements"):
+        props["Hard Requirements"] = _rich("; ".join(job["hard_requirements"]))
+    if job.get("scoring_method") == "claude":
+        props["Requirements Flexible"] = {"checkbox": bool(job.get("requirements_flexible"))}
+    if job.get("unmet_requirements"):
+        props["Unmet Requirements"] = _rich("; ".join(job["unmet_requirements"]))
+    return props
+
+
+def _build_properties(job: dict, ad_properties: set | None = None) -> dict:
+    """ad_properties: which AD_PROPERTIES the board has (None = all of them)."""
     portal = SOURCE_MAP.get(job.get("source", ""), job.get("source", ""))
     keywords = [{"name": _option(kw)} for kw in job.get("matched_keywords", [])[:5] if kw]
     ai_skills = [{"name": _option(sk)} for sk in job.get("ai_matched_skills", [])[:3] if sk]
@@ -108,6 +164,9 @@ def _build_properties(job: dict) -> dict:
         props["Sources"] = {"rich_text": [{"text": {"content": sources_text[:2000]}}]}
     if duplicate_status:
         props["Duplicate Status"] = {"select": {"name": duplicate_status}}
+    for name, value in _ad_properties(job).items():
+        if ad_properties is None or name in ad_properties:
+            props[name] = value
 
     return props
 
@@ -122,6 +181,42 @@ def _heading_block(text: str) -> dict:
 
 def _divider_block() -> dict:
     return {"object": "block", "type": "divider", "divider": {}}
+
+
+# Notion: 2000 characters per text object, 100 blocks per create request.
+_AD_BLOCK_CHARS = 2000
+_MAX_AD_BLOCKS = 60
+
+
+def _ad_blocks(text: str) -> list:
+    """The ad as paragraph blocks: whole paragraphs packed up to 2000 characters."""
+    chunks: list[str] = []
+    for para in text.split("\n\n"):
+        para = para.strip()
+        while para:
+            piece, para = para[:_AD_BLOCK_CHARS], para[_AD_BLOCK_CHARS:]
+            if chunks and len(chunks[-1]) + 2 + len(piece) <= _AD_BLOCK_CHARS:
+                chunks[-1] += "\n\n" + piece
+            else:
+                chunks.append(piece)
+    return [_text_block(c) for c in chunks[:_MAX_AD_BLOCKS]]
+
+
+def _requirements_lines(job: dict) -> list[str]:
+    lines = []
+    if job.get("hard_requirements"):
+        lines.append("Required: " + "; ".join(job["hard_requirements"]))
+        if job.get("requirements_flexible"):
+            lines.append("The ad says not every listed requirement is a must.")
+    if job.get("unmet_requirements"):
+        lines.append("Not met: " + "; ".join(job["unmet_requirements"]))
+    if job.get("tool_gaps"):
+        lines.append("Tools the profile does not list (not counted against the fit): " + "; ".join(job["tool_gaps"]))
+    if job.get("required_years") is not None:
+        lines.append(f"Years of experience asked for: {job['required_years']}")
+    if job.get("contact_person"):
+        lines.append(f"Contact: {job['contact_person']}")
+    return lines
 
 
 def _build_children(job: dict) -> list:
@@ -154,6 +249,21 @@ def _build_children(job: dict) -> list:
         blocks.append(_heading_block("Matched Keywords"))
         blocks.append(_text_block("  •  ".join(keywords)))
 
+    requirements = _requirements_lines(job)
+    if requirements:
+        if blocks:
+            blocks.append(_divider_block())
+        blocks.append(_heading_block("Requirements"))
+        blocks.append(_text_block("\n".join(requirements)[:2000]))
+
+    description = (job.get("description") or "").strip()
+    if description:
+        if blocks:
+            blocks.append(_divider_block())
+        full = job.get("fetch_method") == "full_jd"
+        blocks.append(_heading_block("Job Ad" if full else "Job Ad (search snippet only)"))
+        blocks.extend(_ad_blocks(description))
+
     return blocks
 
 
@@ -173,6 +283,7 @@ def sync_jobs(jobs: list) -> dict:
 
     notion = Client(auth=api_key)
     existing_urls, existing_keys = _get_existing(notion, ds_id)
+    ad_properties = ensure_ad_properties(notion, ds_id) if jobs else set()
 
     added = 0
     skipped = 0
@@ -191,7 +302,7 @@ def sync_jobs(jobs: list) -> dict:
                 children = _build_children(job)
                 create_kwargs: dict = {
                     "parent": {"database_id": db_id},
-                    "properties": _build_properties(job),
+                    "properties": _build_properties(job, ad_properties),
                 }
                 if children:
                     create_kwargs["children"] = children

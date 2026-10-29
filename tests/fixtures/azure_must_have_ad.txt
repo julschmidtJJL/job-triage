@@ -1,0 +1,14 @@
+KI-Engineer (m/w/d) – Hybrid
+(Made-up ad: a cloud vendor named as a must-have.)
+
+Wir bauen ein neues Versicherungsgeschäft auf und setzen dabei von Anfang an auf KI.
+
+Deine Aufgaben:
+• Du entwickelst RAG- und LLM-Anwendungen für unsere Fachbereiche
+• Du bringst KI-Lösungen in den produktiven Betrieb und betreust sie
+
+Das bringst du mit:
+• Studium oder Erfahrung in Informatik, Data Science oder Software-Engineering
+• Sehr gute Python-Kenntnisse
+• Erfahrung mit Azure AI und Cloud-Architekturen ist zwingend erforderlich
+• Gute Deutschkenntnisse

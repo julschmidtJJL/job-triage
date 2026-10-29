@@ -7,6 +7,12 @@ post on LinkedIn. Endpoints (probed 15 Oct 2026):
   search:  GET .../pc/v6/jobs?was=&wo=&umkreis=&angebotsart=1&veroeffentlichtseit=&size=&page=
   details: GET .../pc/v4/jobdetails/<base64(referenznummer)>   (v6 details is 403)
 
+Some ads live at a cooperation partner (jobexport.de, finest-jobs.com, yourfirm.de...):
+the jobdetail page then only says "Vollständige Stellenbeschreibung bei unserem
+Kooperationspartner einsehen", and the details carry the partner link as
+`externeURL`. The API description is usually still complete (all 30 checked on
+27 Oct 2026 were), so the partner page is fetched only when it is empty or short.
+
 Temp-work (Zeitarbeit) and private placement agencies (PAV) are excluded by
 default: they hide the actual employer, and the profile is about the company's
 situation.
@@ -15,6 +21,8 @@ import base64
 import time
 
 import requests
+
+from utils.job_ad import MAX_AD_CHARS, MIN_AD_CHARS, fetch_ad_page, html_to_text
 
 API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 SEARCH_URL = f"{API_BASE}/pc/v6/jobs"
@@ -112,9 +120,17 @@ def fetch_description(url: str) -> str:
         response = requests.get(DETAILS_URL.format(ref_b64=ref_b64), headers=HEADERS, timeout=TIMEOUT)
         if not response.ok:
             return ""
-        return (response.json().get("stellenangebotsBeschreibung") or "")[:8000]
+        details = response.json()
     except Exception:
         return ""
+    # The API text is Markdown-ish with the odd HTML tag; keep its line breaks.
+    text = html_to_text(details.get("stellenangebotsBeschreibung") or "")
+    partner_url = details.get("externeURL") or ""
+    if len(text) < MIN_AD_CHARS and partner_url:
+        partner_text = fetch_ad_page(partner_url)
+        if len(partner_text) > len(text):
+            text = partner_text
+    return text[:MAX_AD_CHARS]
 
 
 if __name__ == "__main__":
