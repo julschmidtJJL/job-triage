@@ -12,6 +12,14 @@ on:
         description: 'Send the weekly report email now (it goes out on Mondays anyway)'
         type: boolean
         default: false
+      dry_run:
+        description: 'Dry run: no Notion upload, no saved state; letters are printed, not written'
+        type: boolean
+        default: false
+      letters_only:
+        description: 'Only draft cover letters for Apply rows that have none yet (no scraping)'
+        type: boolean
+        default: false
 
 jobs:
   run-pipeline:
@@ -52,6 +60,7 @@ jobs:
             pipeline-state-
 
       - name: Run pipeline
+        if: ${{ !inputs.letters_only }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
@@ -63,12 +72,18 @@ jobs:
           MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           SEND_REPORT: ${{ inputs.send_report }}
-        run: python main.py
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python main.py --dry-run
+          else
+            python main.py
+          fi
 
       # Only after a successful run: a failed run (no scoring, no delivery)
       # must not mark its jobs as seen, so the next run retries them.
+      # A dry run must not mark jobs as seen either.
       - name: Save pipeline state
-        if: success()
+        if: success() && !inputs.dry_run && !inputs.letters_only
         uses: actions/cache/save@v4
         with:
           path: |
@@ -78,6 +93,27 @@ jobs:
             data/decision_history.json
             data/query_stats.json
           key: pipeline-state-${{ github.run_id }}
+
+      # A base cover letter for each Apply row without one, as a child page of
+      # the row. Opt-in: set the repository variable LETTERS_ENABLED=true and
+      # the LETTER_FACTS secret. Runs after the state is saved, so a failed
+      # letter never makes the next run re-score jobs, and also when the
+      # scrape failed. The log names each row's job and company: keep a
+      # repository that drafts letters private.
+      - name: Draft cover letters
+        if: ${{ !cancelled() && (vars.LETTERS_ENABLED == 'true' || inputs.letters_only) }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          FIT_PROFILE: ${{ secrets.FIT_PROFILE }}
+          LETTER_FACTS: ${{ secrets.LETTER_FACTS }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/draft_letters.py --dry-run
+          else
+            python scripts/draft_letters.py
+          fi
 
       - name: Upload run logs
         if: always()

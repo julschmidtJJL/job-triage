@@ -3,6 +3,8 @@
 
 # Private: the fit profile is distilled from personal notes and mail
 profile/profile.md
+# Private too: the only facts a cover letter may state
+profile/letter_facts.md
 
 # Runtime state and output (cached across Actions runs, never committed)
 data/
