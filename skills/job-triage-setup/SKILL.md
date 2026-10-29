@@ -1,6 +1,6 @@
 ---
 name: job-triage-setup
-description: Set up job-triage for a new user — install it, interview them for their fit profile and search queries, adapt the location, connect a Notion board, produce a first scored list locally, and optionally set up cover-letter drafts. Use when someone asks to set up, install or configure job-triage.
+description: Set up job-triage for a new user — install it, interview them for their fit profile and search queries, adapt the location, set up the board (Notion or a plain spreadsheet), produce a first scored list locally, and optionally set up cover-letter drafts. Use when someone asks to set up, install or configure job-triage.
 allowed-tools:
   - Bash
   - Read
@@ -11,7 +11,8 @@ allowed-tools:
 # Set up job-triage
 
 You are setting up a daily pipeline that scores job postings against a
-written profile of the user and puts the best ones on a Notion board. The
+written profile of the user and puts the best ones on a board: a Notion
+database, or a CSV file they open in any spreadsheet app. The
 profile is the product: a vague profile gives vague scores. Read the rules,
 then work through the steps in order. Stop and ask whenever a step needs a
 decision only the user can make.
@@ -32,17 +33,18 @@ decision only the user can make.
    command; do not ask them to paste a key into the chat, and never print
    `.env`.
 4. **Nothing personal goes into git.** `profile/profile.md`,
-   `profile/letter_facts.md`, `.env`, `data/` and `logs/` are gitignored. Do
-   not commit or push anything without asking.
+   `profile/letter_facts.md`, `.env`, `board/`, `data/` and `logs/` are
+   gitignored. Do not commit or push anything without asking.
 5. **It never applies anywhere.** Do not add code that contacts employers,
    submits forms, sends a letter, or logs into job sites. Do not add a
    scraper or ad fetcher for a site whose terms forbid it (LinkedIn among
    them).
 
 Tell the user up front what it needs, so they can stop early: an **Anthropic
-API key**, a free **Notion** account, and a job search in **Germany** (the
-Arbeitsagentur API covers all of Germany; the other boards are Hamburg-only).
-GitHub Actions, Google Jobs and the Monday email are optional.
+API key** and a job search in **Germany** (the Arbeitsagentur API covers all
+of Germany; the other job boards are Hamburg-only). Notion is optional: the
+board can be a plain spreadsheet file. GitHub Actions, Google Jobs and the
+Monday email are optional too.
 
 ## 1. Install
 
@@ -124,8 +126,9 @@ cp .env.example .env
 ```
 
 Tell the user which lines to fill in themselves: `ANTHROPIC_API_KEY` (from
-console.anthropic.com), and for later, the Notion values. `SERPAPI_KEY` is
-optional; without it Google Jobs is skipped.
+console.anthropic.com), and the Notion values later, only if they choose a
+Notion board in step 7. `SERPAPI_KEY` is optional; without it Google Jobs is
+skipped.
 
 ## 6. First dry run
 
@@ -150,7 +153,20 @@ Then reset the state, because a dry run marks the jobs it saw as seen:
 rm -rf data/
 ```
 
-## 7. The Notion board
+## 7. The board: Notion or a plain spreadsheet?
+
+Ask: **"Notion or a plain spreadsheet?"** Explain the difference in two
+lines, then follow 7a or 7b.
+
+- **Notion:** a database with a page per job (the assessment and the full ad
+  on the page), Decision as a dropdown, usable from the phone. Needs a free
+  Notion account and an integration token.
+- **Spreadsheet:** `board/jobs.csv` in the repository folder, opened in
+  Excel, Numbers or LibreOffice; the full ad of each job is a Markdown file
+  in `board/ads/`. No account. On GitHub Actions the board lives in their
+  (private) repository, so they pull to see new jobs and push their verdicts.
+
+### 7a. Notion
 
 The user creates an internal integration at notion.so/my-integrations
 (they copy its token into `.env` as `NOTION_API_KEY` themselves).
@@ -175,10 +191,42 @@ bash run_local.sh
 
 Ask them to open the board and mark a few rows: that's how it learns.
 
+### 7b. Spreadsheet
+
+`.env` needs `BOARD=csv` instead of `BOARD=notion`. The user changes the
+line, or you change it without printing the file:
+
+```bash
+sed -i.bak 's/^BOARD=.*/BOARD=csv/' .env && rm .env.bak
+grep -q '^BOARD=csv' .env && echo "BOARD=csv set"
+```
+
+The `NOTION_` lines can stay as they are; nothing reads them. Then the first
+real run:
+
+```bash
+bash run_local.sh
+```
+
+It creates `board/jobs.csv`, one row per job, and `board/ads/<Key>.md` with
+the assessment, the requirements and the full ad. Explain how to use it:
+
+- Open `board/jobs.csv`, type a Decision (New, Interesting, Maybe, Apply,
+  Applied, Not interesting, Declined) and save it as CSV, keeping the format
+  when the app asks.
+- Each run only appends new jobs; their Decisions, extra columns and column
+  order are kept. The run fills in an empty Decided with the date.
+- Close the file before a run: Excel on Windows locks it, and the new jobs
+  then wait in the holdover queue until the next run.
+
+Ask them to mark a few rows and save: that's how it learns.
+
 ## 8. Cover-letter drafts (optional)
 
-Only if they want them. A row they mark **Apply** then gets a draft letter
-as a child page, from the full ad on the row and a facts file they control.
+Only if they want them. A row they mark **Apply** then gets a draft letter,
+from the full ad stored with the row and a facts file they control: a child
+page of the row on Notion, `board/letters/<Key>.md` on the spreadsheet
+board (named after the row's Key; an existing file is never overwritten).
 
 ```bash
 cp profile/letter_facts.example.md profile/letter_facts.md
@@ -215,11 +263,32 @@ and they name the jobs on the board. Give them the commands; they run them:
 
 ```bash
 gh secret set ANTHROPIC_API_KEY
+gh secret set FIT_PROFILE < profile/profile.md
+gh variable set JOBHUNT_ENABLED --body true
+```
+
+For a Notion board:
+
+```bash
 gh secret set NOTION_API_KEY
 gh secret set NOTION_JOB_BOARD_DB_ID
 gh secret set NOTION_DATA_SOURCE_ID
-gh secret set FIT_PROFILE < profile/profile.md
-gh variable set JOBHUNT_ENABLED --body true
+```
+
+For the spreadsheet board:
+
+```bash
+gh variable set BOARD --body csv
+```
+
+Each run then commits `board/` to their repository (the workflow refuses if
+the repository is public). Tell them to `git pull` to see new jobs and to
+commit and push `board/jobs.csv` after they type their Decisions. If they
+already have a local board from step 7b, they push it once first; `board/`
+is gitignored, so it needs `-f`:
+
+```bash
+git add -f board && git commit -m "Job board" && git push
 ```
 
 Optional: `SERPAPI_KEY`, and `MAIL_USER`, `MAIL_APP_PASSWORD`, `MAIL_TO` for
@@ -236,5 +305,6 @@ tick.
 
 ## Done
 
-Summarise what was set up, where the profile and the letter facts live, how
-to change queries, and that the stop-list stays in shadow mode for 14 days.
+Summarise what was set up, where the profile, the letter facts and the
+board live, how to change queries, and that the stop-list stays in shadow
+mode for 14 days.

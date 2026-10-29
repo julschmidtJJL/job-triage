@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       dry_run:
-        description: 'Dry run: no Notion upload, no saved state; letters are printed, not written'
+        description: 'Dry run: nothing written to the board, no saved state; letters are printed'
         type: boolean
         default: false
       letters_only:
@@ -30,9 +30,25 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || vars.JOBHUNT_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Write access is for BOARD=csv, which commits board/ back (last step);
+    # a Notion board never writes to the repository.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
+
+      # BOARD=csv commits your job board to this repository (last step):
+      # stop before any work if the repository is public.
+      - name: Check the board can be committed
+        if: ${{ vars.BOARD == 'csv' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" != "true" ]; then
+            echo "::error::BOARD=csv commits your job board to this repository. Make it private first."
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -63,6 +79,7 @@ jobs:
         if: ${{ !inputs.letters_only }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BOARD: ${{ vars.BOARD }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_JOB_BOARD_DB_ID: ${{ secrets.NOTION_JOB_BOARD_DB_ID }}
           NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
@@ -95,7 +112,7 @@ jobs:
           key: pipeline-state-${{ github.run_id }}
 
       # A base cover letter for each Apply row without one, as a child page of
-      # the row. Opt-in: set the repository variable LETTERS_ENABLED=true and
+      # the row (Notion) or in board/letters/ (csv). Opt-in: set the repository variable LETTERS_ENABLED=true and
       # the LETTER_FACTS secret. Runs after the state is saved, so a failed
       # letter never makes the next run re-score jobs, and also when the
       # scrape failed. The log names each row's job and company: keep a
@@ -104,6 +121,7 @@ jobs:
         if: ${{ !cancelled() && (vars.LETTERS_ENABLED == 'true' || inputs.letters_only) }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BOARD: ${{ vars.BOARD }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
           FIT_PROFILE: ${{ secrets.FIT_PROFILE }}
@@ -114,6 +132,36 @@ jobs:
           else
             python scripts/draft_letters.py
           fi
+
+      # BOARD=csv: the board is the board/ folder, so the run commits it back,
+      # also after a failed run (the rows it wrote stay, as they would on
+      # Notion). Never in a public repository: the board names every job you
+      # looked at and what you decided. If you pushed an edit to jobs.csv
+      # during the run, the merge driver keeps your cells and the new rows.
+      - name: Commit the board
+        if: ${{ !cancelled() && vars.BOARD == 'csv' && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" != "true" ]; then
+            echo "::error::BOARD=csv commits your job board to this repository. Make it private first."
+            exit 1
+          fi
+          [ -d board ] || exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git config merge.jobs-csv.driver "python -m job_board.csv_board merge %O %A %B"
+          git add -f board
+          git diff --cached --quiet && exit 0
+          git commit -q -m "board: run ${{ github.run_id }}"
+          for attempt in 1 2 3; do
+            if git pull -q --rebase origin "$GITHUB_REF_NAME" && git push -q origin "HEAD:$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep 10
+          done
+          exit 1
 
       - name: Upload run logs
         if: always()

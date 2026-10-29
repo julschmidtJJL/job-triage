@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# BOARD=csv on Actions: merge the board row by row (job_board/csv_board.py).
+board/jobs.csv merge=jobs-csv

@@ -9,7 +9,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import draft_letters
-from draft_letters import LetterDraft, enforce_rules, letter_blocks, letter_frame, letter_text, never_write, select_rows
+from draft_letters import LetterDraft, enforce_rules, letter_blocks, letter_frame, letter_text, never_write
+from job_board import notion_board
+from job_board.notion_board import select_rows
 
 
 def _page(page_id: str, company: str = "Acme", language: str = "German", contact: str = "",
@@ -90,7 +92,7 @@ def test_row_with_only_a_snippet_is_skipped():
 def test_only_apply_rows_are_queried():
     notion = MagicMock()
     notion.data_sources.query.return_value = {"results": [], "has_more": False}
-    draft_letters.apply_rows(notion, "ds")
+    notion_board.apply_rows(notion, "ds")
     assert notion.data_sources.query.call_args.kwargs["filter"] == {"property": "Decision", "select": {"equals": "Apply"}}
 
 
@@ -104,14 +106,14 @@ def _draft(**kw) -> LetterDraft:
 
 
 def test_letter_opens_with_the_literal_placeholder():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     draft = enforce_rules(_draft(), row)
     assert draft.paragraphs[0] == "[Warum Acme, in Ihren eigenen Worten.] Als Analystin bringe ich Planungserfahrung mit."
     assert draft.checks == []
 
 
 def test_a_missing_start_date_is_added_and_a_money_amount_flagged():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     draft = enforce_rules(_draft(paragraphs=["Zwei Runden über 15.000 € finanziert.", "Gern im Gespräch."]), row)
     assert draft.paragraphs[0].startswith("[Warum Acme, in Ihren eigenen Worten.] Zwei Runden")
     assert draft.paragraphs[-1] == "Ich stehe ab [Datum] zur Verfügung. Gern im Gespräch."
@@ -121,13 +123,13 @@ def test_a_missing_start_date_is_added_and_a_money_amount_flagged():
 
 @pytest.mark.parametrize("amount", ["15.000 €", "€15k", "EUR 15000", "$15,000", "15000 USD", "15k"])
 def test_money_is_flagged_either_side_of_the_number(amount):
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     draft = enforce_rules(_draft(paragraphs=[f"Runde über {amount}.", "Ab [Datum]."]), row)
     assert any("amount of money" in c for c in draft.checks)
 
 
 def test_plain_numbers_are_not_money():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     draft = enforce_rules(_draft(paragraphs=["Wir planen 40 Touren mit 12 Fahrzeugen.", "Ab [Datum]."]), row)
     assert draft.checks == []
 
@@ -155,46 +157,46 @@ def test_the_frame_and_banned_phrases_come_from_the_facts():
 
 
 def test_a_banned_phrase_is_flagged_whatever_its_case():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     draft = enforce_rules(_draft(paragraphs=["Als teamleiterin plante ich.", "Ab [Datum]."]), row,
                           never_write(FACTS))
     assert draft.checks == ['The letter says "Teamleiterin", which the letter facts list under Never write.']
 
 
 def test_an_empty_letter_is_an_error():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     with pytest.raises(ValueError):
         enforce_rules(_draft(paragraphs=["  "]), row)
 
 
 def test_write_rechecks_the_row_and_never_adds_a_second_letter():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     notion = _notion({"a": AD_BODY + [_child_page("Anschreiben – Acme")]})
     with pytest.raises(ValueError, match="second"):
-        draft_letters.write_letter(notion, row, [])
+        notion_board.write_letter(notion, row, [])
     notion.pages.create.assert_not_called()
 
 
 def test_write_refuses_more_than_100_blocks():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     notion = _notion({"a": AD_BODY})
     with pytest.raises(ValueError, match="100"):
-        draft_letters.write_letter(notion, row, [{}] * 101)
+        notion_board.write_letter(notion, row, [{}] * 101)
     notion.pages.create.assert_not_called()
 
 
 def test_write_creates_the_page_under_the_row():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     notion = _notion({"a": AD_BODY})
     notion.pages.create.return_value = {"url": "https://notion.so/x"}
-    assert draft_letters.write_letter(notion, row, [{"type": "divider"}]) == "https://notion.so/x"
+    assert notion_board.write_letter(notion, row, [{"type": "divider"}]) == "https://notion.so/x"
     kwargs = notion.pages.create.call_args.kwargs
     assert kwargs["parent"] == {"page_id": "a"}
     assert kwargs["properties"]["title"]["title"][0]["text"]["content"] == "Anschreiben – Acme"
 
 
 def test_page_has_callout_with_odds_and_website_note_then_the_letter():
-    row = draft_letters.row_facts(_page("a", contact="Erika Muster, Recruiting"))
+    row = notion_board.row_facts(_page("a", contact="Erika Muster, Recruiting"))
     blocks = letter_blocks(enforce_rules(_draft(), row), row, date(2026, 10, 29), letter_frame(FACTS))
     assert blocks[0]["type"] == "callout"
     callout = "".join(t["text"]["content"] for t in blocks[0]["callout"]["rich_text"])
@@ -209,14 +211,14 @@ def test_page_has_callout_with_odds_and_website_note_then_the_letter():
 
 
 def test_without_a_frame_the_name_is_left_to_fill_in():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     text = letter_text(letter_blocks(enforce_rules(_draft(), row), row, date(2026, 10, 29)))
     assert "\n\n29. Oktober 2026\n\n" in text
     assert text.endswith("Mit freundlichen Grüßen\n[Name]")
 
 
 def test_a_long_callout_is_not_cut():
-    row = draft_letters.row_facts(_page("a"))
+    row = notion_board.row_facts(_page("a"))
     draft = enforce_rules(_draft(checks=["x" * 1500, "y" * 1500]), row)
     block = letter_blocks(draft, row, date(2026, 10, 29))[0]
     assert all(len(t["text"]["content"]) <= 2000 for t in block["callout"]["rich_text"])
@@ -224,7 +226,7 @@ def test_a_long_callout_is_not_cut():
 
 
 def test_english_ad_gets_an_english_frame_and_placeholders():
-    row = draft_letters.row_facts(_page("a", language="English"))
+    row = notion_board.row_facts(_page("a", language="English"))
     draft = enforce_rules(_draft(paragraphs=["I bring numbers.", "Happy to talk."]), row)
     assert draft.paragraphs[0] == "[Why Acme, in your own words.] I bring numbers."
     assert draft.paragraphs[-1] == "I can start on [Start date]. Happy to talk."
@@ -239,7 +241,7 @@ def test_dry_run_writes_nothing(monkeypatch, tmp_path):
     notion = MagicMock()
     notion.data_sources.query.return_value = {"results": [_page("a")], "has_more": False}
     notion.blocks.children.list.return_value = {"results": AD_BODY, "has_more": False}
-    monkeypatch.setattr(draft_letters, "Client", lambda auth: notion)
+    monkeypatch.setattr(notion_board, "Client", lambda auth: notion)
     monkeypatch.setattr(draft_letters, "DATA_DIR", tmp_path)
     monkeypatch.setattr(draft_letters, "load_profile_text", lambda: "profile")
     monkeypatch.setattr(draft_letters, "load_letter_facts", lambda: "facts")
@@ -258,7 +260,7 @@ def test_no_letter_without_the_facts(monkeypatch, tmp_path):
     notion = MagicMock()
     notion.data_sources.query.return_value = {"results": [_page("a")], "has_more": False}
     notion.blocks.children.list.return_value = {"results": AD_BODY, "has_more": False}
-    monkeypatch.setattr(draft_letters, "Client", lambda auth: notion)
+    monkeypatch.setattr(notion_board, "Client", lambda auth: notion)
     monkeypatch.setattr(draft_letters, "load_profile_text", lambda: "profile")
     monkeypatch.setattr(draft_letters, "load_letter_facts", lambda: "")
     monkeypatch.setattr(draft_letters, "load_dotenv", lambda *a, **k: None)

@@ -1,16 +1,18 @@
 """Draft a base cover letter for every Apply row that has none yet.
 
-For each board row with Decision = Apply and no "Anschreiben" child page: read the
-full ad stored on the row (the Requirements and Job Ad blocks, Hard Requirements,
+For each board row with Decision = Apply and no letter yet: read the full ad
+stored with the row (the Requirements and Job Ad sections, Hard Requirements,
 Unmet Requirements, Contact Person, Ad Language), draft a letter in the ad's
-language against the fit profile and the letter facts, and put it on the row as
-a child page "Anschreiben – <Company>". A short callout above the letter gives the
-honest odds and which ad bullets the letter covers and which it doesn't.
+language against the fit profile and the letter facts, and put it on the board.
+On Notion (BOARD=notion, the default) it is a child page "Anschreiben – <Company>"
+of the row; with BOARD=csv it is board/letters/<Key>.md. A short note above
+the letter gives the honest odds and which ad bullets the letter covers and which
+it doesn't.
 
 The letter is a draft: it opens with a placeholder for your motive
 ([Warum <Company>, in Ihren eigenen Worten.] / [Why <Company>, in your own words.])
 and leaves the start date as [Datum] / [Start date]. Rows whose ad was never
-fetched (no "Job Ad" block) are skipped: a letter from a search snippet misses
+fetched (no "Job Ad" section) are skipped: a letter from a search snippet misses
 the language, the contact and the real requirements.
 
 The letter facts (profile/letter_facts.md or the LETTER_FACTS secret; shape in
@@ -20,14 +22,14 @@ any phrase in backticks under "Never write" is checked in every draft.
 
     python scripts/draft_letters.py                  # draft and write
     python scripts/draft_letters.py --dry-run        # draft and print, write nothing
-    python scripts/draft_letters.py --page-id <row>  # one row, whatever its Decision
+    python scripts/draft_letters.py --row <id>       # one row, whatever its Decision
+                                                     # (a Notion page ID or a jobs.csv Key)
 """
 import argparse
 import json
 import os
 import re
 import sys
-import time
 from datetime import date
 from pathlib import Path
 
@@ -35,18 +37,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import anthropic
 from dotenv import load_dotenv
-from notion_client import APIResponseError, Client
 from pydantic import BaseModel
 
-from notion_sync.sync import _ad_blocks, _divider_block, _plain, _text_block
+from job_board import LetterPage, get_board
+from job_board.notion_board import page_blocks
 from utils.profile import load_letter_facts, load_profile_text
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-DECISION = "Apply"
-LETTER_TITLE = "Anschreiben"
 DEFAULT_LETTER_MODEL = "claude-sonnet-5-5"
-# The longest ads run to ~20k characters; this only guards against a runaway page.
-_MAX_AD_CHARS = 40000
 _MONTHS_DE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
               "September", "Oktober", "November", "Dezember"]
 
@@ -93,113 +91,6 @@ def letter_frame(facts: str) -> dict[str, str]:
 def never_write(facts: str) -> list[str]:
     """The phrases in backticks under "Never write": each draft is checked for them."""
     return [p.strip() for p in re.findall(r"`([^`\n]+)`", _section(facts, "Never write")) if p.strip()]
-
-
-# ---------------------------------------------------------------- the board
-
-
-def _list_blocks(notion: Client, page_id: str) -> list[dict]:
-    blocks: list[dict] = []
-    cursor = None
-    while True:
-        kwargs: dict = {"page_size": 100}
-        if cursor:
-            kwargs["start_cursor"] = cursor
-        data = notion.blocks.children.list(page_id, **kwargs)
-        blocks.extend(data.get("results", []))
-        if not data.get("has_more"):
-            return blocks
-        cursor = data.get("next_cursor")
-
-
-def has_letter(blocks: list[dict]) -> bool:
-    """A child page titled "Anschreiben…" means the row has a letter (drafted
-    here or by hand), so it is never drafted twice."""
-    return any(b.get("type") == "child_page"
-               and (b.get("child_page") or {}).get("title", "").startswith(LETTER_TITLE)
-               for b in blocks)
-
-
-def _block_text(block: dict) -> str:
-    body = block.get(block.get("type", "")) or {}
-    return "".join(t.get("plain_text", "") for t in body.get("rich_text", []) or [])
-
-
-def body_sections(blocks: list[dict]) -> dict[str, str]:
-    """The page body as {heading: text}, one entry per heading_3 section."""
-    sections: dict[str, list[str]] = {}
-    current = None
-    for block in blocks:
-        kind = block.get("type")
-        if kind == "heading_3":
-            current = _block_text(block).strip()
-            sections[current] = []
-        elif current and kind == "paragraph":
-            sections[current].append(_block_text(block))
-    return {name: "\n\n".join(p for p in parts if p.strip()) for name, parts in sections.items()}
-
-
-def row_facts(page: dict) -> dict:
-    props = page.get("properties", {})
-
-    def select(name: str) -> str:
-        return ((props.get(name) or {}).get("select") or {}).get("name", "")
-
-    return {
-        "page_id": page.get("id", ""),
-        "title": _plain(props.get("Job Title"), "title"),
-        "company": _plain(props.get("Company"), "rich_text").strip(),
-        "location": _plain(props.get("Location"), "rich_text"),
-        "url": (props.get("URL") or {}).get("url") or "",
-        "decision": select("Decision"),
-        "score": (props.get("Relevance Score") or {}).get("number"),
-        "ad_language": select("Ad Language") or "German",
-        "seniority": select("Seniority"),
-        "required_years": (props.get("Required Years") or {}).get("number"),
-        "contact_person": _plain(props.get("Contact Person"), "rich_text"),
-        "hard_requirements": _plain(props.get("Hard Requirements"), "rich_text"),
-        "requirements_flexible": bool((props.get("Requirements Flexible") or {}).get("checkbox")),
-        "unmet_requirements": _plain(props.get("Unmet Requirements"), "rich_text"),
-    }
-
-
-def apply_rows(notion: Client, ds_id: str) -> list[dict]:
-    flt = {"property": "Decision", "select": {"equals": DECISION}}
-    pages: list[dict] = []
-    cursor = None
-    while True:
-        kwargs: dict = {"filter": flt, "page_size": 100}
-        if cursor:
-            kwargs["start_cursor"] = cursor
-        data = notion.data_sources.query(ds_id, **kwargs)
-        pages.extend(data.get("results", []))
-        if not data.get("has_more"):
-            return pages
-        cursor = data.get("next_cursor")
-
-
-def select_rows(notion: Client, pages: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
-    """(rows to draft, each with its ad and requirements; (row, reason) skipped)."""
-    todo, skipped = [], []
-    for page in pages:
-        row = row_facts(page)
-        if not row["company"]:
-            skipped.append((row, "no company on the row"))
-            continue
-        blocks = _list_blocks(notion, row["page_id"])
-        if has_letter(blocks):
-            skipped.append((row, "already has an Anschreiben page"))
-            continue
-        sections = body_sections(blocks)
-        if not sections.get("Job Ad"):
-            reason = ("only a search snippet on the row" if "Job Ad (search snippet only)" in sections
-                      else "no Job Ad block on the row")
-            skipped.append((row, reason + "; paste the full ad under a 'Job Ad' heading to get a letter"))
-            continue
-        row["job_ad"] = sections["Job Ad"][:_MAX_AD_CHARS]
-        row["requirements_block"] = sections.get("Requirements", "")
-        todo.append(row)
-    return todo, skipped
 
 
 # ---------------------------------------------------------------- the letter
@@ -299,8 +190,6 @@ def draft_letter(client, row: dict, profile: str, facts: str) -> LetterDraft:
 
 # An amount before or after its currency: "15.000 €", "€15k", "EUR 15000", "$15,000".
 _MONEY = re.compile(r"\d[\d.,]*\s?(€|EUR\b|Euro|USD\b|\$|k\b)|(€|\$|\bEUR|\bUSD)\s?\d", re.IGNORECASE)
-# Notion: at most 100 blocks in one create request.
-_MAX_PAGE_BLOCKS = 100
 
 
 def enforce_rules(draft: LetterDraft, row: dict, banned: list[str] = ()) -> LetterDraft:
@@ -340,19 +229,6 @@ def _date_line(english: bool, today: date, city: str = "") -> str:
     return f"{city}, {day}" if city else day
 
 
-def _bold_block(text: str) -> dict:
-    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
-        {"type": "text", "text": {"content": text}, "annotations": {"bold": True}}]}}
-
-
-def _callout_block(lines: list[str]) -> dict:
-    return {"object": "block", "type": "callout", "callout": {
-        "icon": {"type": "emoji", "emoji": "💡"}, "color": "gray_background",
-        # One text object per line: each may hold 2000 characters.
-        "rich_text": [{"type": "text", "text": {"content": (line + "\n" if i < len(lines) - 1 else line)[:2000]}}
-                      for i, line in enumerate(lines)]}}
-
-
 def callout_lines(draft: LetterDraft, row: dict, today: date) -> list[str]:
     lines = [f"Draft by {letter_model()}, {today.isoformat()}, from the ad on this row. "
              f"Still yours: {placeholder(row['company'], _english(row))} and {start_date(_english(row))}.",
@@ -369,20 +245,21 @@ def callout_lines(draft: LetterDraft, row: dict, today: date) -> list[str]:
     return lines
 
 
-def letter_blocks(draft: LetterDraft, row: dict, today: date, frame: dict | None = None) -> list[dict]:
+def letter_page(draft: LetterDraft, row: dict, today: date, frame: dict | None = None) -> LetterPage:
     """frame: name and city from the letter facts (letter_frame())."""
     frame = frame or {}
     english = _english(row)
     subject = (f"Application for {row['title']}" if english else f"Bewerbung als {row['title']}")
     name = frame.get("name") or "[Name]"
     closing = f"Yours sincerely,\n{name}" if english else f"Mit freundlichen Grüßen\n{name}"
-    blocks = [_callout_block(callout_lines(draft, row, today)), _divider_block(),
-              _text_block(_date_line(english, today, frame.get("city", ""))), _bold_block(subject),
-              _text_block(draft.salutation.strip())]
-    for paragraph in draft.paragraphs:
-        blocks.extend(_ad_blocks(paragraph))
-    blocks.append(_text_block(closing))
-    return blocks
+    return LetterPage(company=row["company"], callout=callout_lines(draft, row, today),
+                      date_line=_date_line(english, today, frame.get("city", "")), subject=subject,
+                      salutation=draft.salutation.strip(), paragraphs=list(draft.paragraphs), closing=closing)
+
+
+def letter_blocks(draft: LetterDraft, row: dict, today: date, frame: dict | None = None) -> list[dict]:
+    """The letter as Notion blocks."""
+    return page_blocks(letter_page(draft, row, today, frame))
 
 
 def letter_text(blocks: list[dict]) -> str:
@@ -391,49 +268,21 @@ def letter_text(blocks: list[dict]) -> str:
                        for b in blocks if b["type"] != "divider")
 
 
-def write_letter(notion: Client, row: dict, blocks: list[dict]) -> str:
-    """Create the letter page under the row. Checks the row again first, so a
-    run that overlaps another (schedule plus a manual run) does not add a second."""
-    if len(blocks) > _MAX_PAGE_BLOCKS:
-        raise ValueError(f"{len(blocks)} blocks, Notion takes at most {_MAX_PAGE_BLOCKS} per page create")
-    if has_letter(_list_blocks(notion, row["page_id"])):
-        raise ValueError("the row got an Anschreiben page during this run; not writing a second")
-    for attempt in range(2):
-        try:
-            page = notion.pages.create(
-                parent={"page_id": row["page_id"]},
-                icon={"type": "emoji", "emoji": "✉️"},
-                properties={"title": {"title": [{"text": {"content": f"{LETTER_TITLE} – {row['company']}"}}]}},
-                children=blocks,
-            )
-            time.sleep(0.4)
-            return page.get("url", page.get("id", ""))
-        except APIResponseError as e:
-            if e.status == 429 and attempt == 0:
-                time.sleep(1.0)
-                continue
-            raise
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--dry-run", action="store_true", help="draft and print, write nothing to Notion")
-    parser.add_argument("--page-id", action="append", default=[],
-                        help="draft for this board row whatever its Decision (repeatable)")
+    parser.add_argument("--dry-run", action="store_true", help="draft and print, write nothing to the board")
+    parser.add_argument("--row", "--page-id", dest="rows", action="append", default=[],
+                        help="draft for this board row whatever its Decision: a Notion page ID "
+                             "or a jobs.csv Key (repeatable)")
     parser.add_argument("--limit", type=int, help="draft at most this many letters")
     args = parser.parse_args(argv)
     load_dotenv(Path(__file__).parent.parent / ".env")
 
-    notion = Client(auth=os.environ["NOTION_API_KEY"])
-    if args.page_id:
-        pages = [notion.pages.retrieve(pid) for pid in args.page_id]
-    else:
-        ds_id = os.environ["NOTION_DATA_SOURCE_ID"].replace("-", "").strip()
-        pages = apply_rows(notion, ds_id)
-    todo, skipped = select_rows(notion, pages)
+    board = get_board()
+    read, todo, skipped = board.letter_rows(args.rows)
     if args.limit is not None:
         todo = todo[:args.limit]
-    print(f"[INFO] {len(pages)} rows read, {len(todo)} to draft, {len(skipped)} skipped")
+    print(f"[INFO] {read} rows read, {len(todo)} to draft, {len(skipped)} skipped")
     for row, reason in skipped:
         print(f"□ skipped: {row['title']} @ {row['company']}: {reason}")
     if not todo:
@@ -456,13 +305,13 @@ def main(argv: list[str] | None = None) -> int:
         label = f"{row['title']} @ {row['company']}"
         try:
             draft = draft_letter(client, row, profile, facts)
-            blocks = letter_blocks(draft, row, today, frame)
-            entry = {"page_id": row["page_id"], "title": row["title"], "company": row["company"],
-                     "draft": draft.model_dump(), "text": letter_text(blocks)}
+            page = letter_page(draft, row, today, frame)
+            entry = {"row_id": row["row_id"], "title": row["title"], "company": row["company"],
+                     "draft": draft.model_dump(), "text": page.text()}
             if args.dry_run:
                 print(f"\n■ {label}\n{entry['text']}\n")
             else:
-                entry["letter_url"] = write_letter(notion, row, blocks)
+                entry["letter_url"] = board.add_letter(row, page)
                 print(f"[OK] Letter drafted: {label} → {entry['letter_url']}")
             results.append(entry)
         except Exception as e:
