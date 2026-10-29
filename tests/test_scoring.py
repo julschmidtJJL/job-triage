@@ -303,6 +303,22 @@ def test_flexible_ad_is_not_capped(monkeypatch):
     assert job["requirements_flexible"] is True
 
 
+def test_the_profile_decides_what_a_fit_is_not_the_title(monkeypatch):
+    """A profile's own fit questions (profile.example.md, "What counts as a fit")
+    reach the scorer, which is told to weigh them above the title."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    profile = (Path(__file__).parent.parent / "profile" / "profile.example.md").read_text(encoding="utf-8")
+    assert "## What counts as a fit" in profile
+    client = _fake_client(lambda p: _result(id=p["id"], score=5))
+    with patch.object(pl.anthropic, "Anthropic", return_value=client), \
+         patch.object(pl, "fetch_full_description", return_value=("ad", "full_jd")):
+        _score([_make_job("KI Manager")], profile_text=profile)
+    system = client.messages.parse.call_args.kwargs["system"]
+    assert "What would I learn?" in system
+    assert "regardless of the job title" in system
+    assert "Neither the industry nor the job title matters on its own" in system
+
+
 def test_prompt_asks_for_judgement_not_keyword_counting(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     client = _fake_client(lambda p: _result(id=p["id"], score=5))
