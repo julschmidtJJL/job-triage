@@ -6,6 +6,10 @@ profile/profile.md
 # Private too: the only facts a cover letter may state
 profile/letter_facts.md
 
+# BOARD=csv: your job board. Ignored so it never reaches a public copy by
+# accident; on Actions the workflow adds it to your private repository.
+board/
+
 # Runtime state and output (cached across Actions runs, never committed)
 data/
 logs/
