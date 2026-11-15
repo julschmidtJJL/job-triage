@@ -76,11 +76,12 @@ def test_get_existing_urls_returns_url_set():
     assert result == {"https://existing.com/1", "https://existing.com/2"}
 
 
-def test_get_existing_urls_returns_empty_on_exception():
+def test_get_existing_urls_raises_on_exception():
+    from notion_sync.sync import BoardReadError
     mock_notion = MagicMock()
     mock_notion.data_sources.query.side_effect = Exception("API-Fehler")
-    result = _get_existing_urls(mock_notion, "ds-id")
-    assert result == set()
+    with pytest.raises(BoardReadError):
+        _get_existing_urls(mock_notion, "ds-id")
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +358,39 @@ def test_tool_gaps_are_shown_but_not_as_unmet():
     assert "Tools the profile does not list (not counted against the fit): Azure AI" in requirements
     assert "Not met" not in requirements
     assert "Unmet Requirements" not in _build_properties({**AD_JOB, "unmet_requirements": []})
+
+
+
+# ---------------------------------------------------------------------------
+# A board read that fails creates nothing
+# ---------------------------------------------------------------------------
+
+
+def _fails_on_page_two():
+    mock_notion = _make_mock_notion()
+    page_one = {"results": [{"properties": {"URL": {"url": "https://existing.com/1"}}}],
+                "has_more": True, "next_cursor": "c2"}
+    mock_notion.data_sources.query.side_effect = [page_one, Exception("502 Bad Gateway")]
+    return mock_notion
+
+
+def test_sync_jobs_creates_nothing_when_the_board_read_fails_midway(capsys):
+    mock_notion = _fails_on_page_two()
+    jobs = [SAMPLE_JOB, {**SAMPLE_JOB, "url": "https://example.com/other", "title": "Other"}]
+    with patch("notion_sync.sync.Client", return_value=mock_notion), patch.dict("os.environ", ENV), \
+         patch("notion_sync.sync.time.sleep"):
+        result = sync_jobs(jobs)
+    mock_notion.pages.create.assert_not_called()
+    assert result["added"] == 0 and result["failed_jobs"] == jobs
+    assert "nothing added, 2 jobs held for the next run" in capsys.readouterr().out
+
+
+def test_auto_dropped_creates_nothing_when_the_board_read_fails_midway(monkeypatch):
+    import notion_sync.sync as sync_mod
+    monkeypatch.setattr(sync_mod, "_write_sidecar", lambda jobs: None)
+    mock_notion = _fails_on_page_two()
+    with patch("notion_sync.sync.Client", return_value=mock_notion), patch.dict("os.environ", ENV), \
+         patch("notion_sync.sync.time.sleep"):
+        result = sync_mod.sync_auto_dropped([{**SAMPLE_JOB, "stop_reason": "company 'x'"}])
+    mock_notion.pages.create.assert_not_called()
+    assert result == {"added": 0, "skipped": 0}

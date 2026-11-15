@@ -152,30 +152,31 @@ def test_claude_scores_against_the_profile(monkeypatch):
     assert kwargs["output_format"] is ScoreBatch
 
 
-def test_claude_failure_keeps_tier1_score(monkeypatch, capsys):
+def test_claude_failure_marks_the_job_unscored(monkeypatch, capsys):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     client = MagicMock()
     client.messages.parse.side_effect = RuntimeError("boom")
     with patch.object(pl.anthropic, "Anthropic", return_value=client):
         job = _score([_make_job("AI Engineer")], profile_text="PROFILE")[0]
-    assert job["relevance_score"] >= 40
-    assert job["scoring_method"] == "keyword_fallback"
-    assert "[WARN]" in capsys.readouterr().out
+    assert job["scoring_method"] == "unscored"
+    assert client.messages.parse.call_count == 2  # one retry
+    out = capsys.readouterr().out
+    assert "retrying in 10 s" in out and "failed twice" in out
 
 
-def test_claude_refusal_keeps_tier1_score(monkeypatch):
+def test_claude_refusal_marks_the_job_unscored(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     client = MagicMock()
     client.messages.parse.return_value = SimpleNamespace(parsed_output=None, stop_reason="refusal")
     with patch.object(pl.anthropic, "Anthropic", return_value=client):
         job = _score([_make_job("AI Engineer")], profile_text="PROFILE")[0]
-    assert job["scoring_method"] == "keyword_fallback"
+    assert job["scoring_method"] == "unscored"
 
 
-def test_missing_api_key_skips_claude(monkeypatch):
+def test_missing_api_key_leaves_jobs_unscored(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     job = _score([_make_job("AI Engineer")], profile_text="PROFILE")[0]
-    assert job["scoring_method"] == "keyword_fallback"
+    assert job["scoring_method"] == "unscored"
 
 
 # ---------------------------------------------------------------- settings
@@ -337,7 +338,7 @@ def test_without_claude_language_and_years_come_from_the_text(monkeypatch):
           "CTO. You bring 5+ years of experience in data engineering and you are fluent in English.")
     with patch.object(pl, "fetch_full_description", return_value=(ad, "full_jd")):
         job = _score([_make_job("Data Lead")], profile_text="profile")[0]
-    assert job["scoring_method"] == "keyword_fallback"
+    assert job["scoring_method"] == "unscored"
     assert job["ad_language"] == "English" and job["required_years"] == 5
     assert job["description"] == ad
 

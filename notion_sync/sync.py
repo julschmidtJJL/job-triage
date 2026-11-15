@@ -39,8 +39,14 @@ def _plain(prop: dict, kind: str) -> str:
     return "".join(item.get("plain_text", "") for item in (prop or {}).get(kind, []) or [])
 
 
+class BoardReadError(Exception):
+    """The board could not be read completely, so duplicates can't be told apart."""
+
+
 def _get_existing(notion: Client, ds_id: str) -> tuple[set, set]:
-    """(URLs, (title, company) keys) of every row already on the board."""
+    """(URLs, (title, company) keys) of every row already on the board.
+    Raises BoardReadError if any page of the read fails: half a list would
+    let every job past the duplicate check."""
     existing_urls: set = set()
     existing_keys: set = set()
     try:
@@ -62,7 +68,7 @@ def _get_existing(notion: Client, ds_id: str) -> tuple[set, set]:
                 break
             cursor = data.get("next_cursor")
     except Exception as e:
-        print(f"[WARN] Could not load existing URLs: {e}")
+        raise BoardReadError(str(e)) from e
     return existing_urls, existing_keys
 
 
@@ -282,7 +288,13 @@ def sync_jobs(jobs: list) -> dict:
         return {"added": 0, "skipped": 0, "failed": len(jobs), "failed_jobs": list(jobs)}
 
     notion = Client(auth=api_key)
-    existing_urls, existing_keys = _get_existing(notion, ds_id)
+    try:
+        existing_urls, existing_keys = _get_existing(notion, ds_id)
+    except BoardReadError as e:
+        # Nothing is created: the jobs go back to the queue (main.py) and the
+        # run counts as failed, so the next run tries again with a full list.
+        print(f"[SYNC] board could not be read ({e}): nothing added, {len(jobs)} jobs held for the next run")
+        return {"added": 0, "skipped": 0, "failed": len(jobs), "failed_jobs": list(jobs), "board_unreadable": True}
     ad_properties = ensure_ad_properties(notion, ds_id) if jobs else set()
 
     added = 0
@@ -409,7 +421,12 @@ def sync_auto_dropped(jobs: list) -> dict:
         return {"added": 0, "skipped": 0}
 
     notion = Client(auth=api_key)
-    existing_urls = _get_existing_urls(notion, ds_id)
+    try:
+        existing_urls = _get_existing_urls(notion, ds_id)
+    except BoardReadError as e:
+        # Auto-Dropped rows are a convenience: a lost day is fine, duplicates aren't.
+        print(f"[AUTO-DROP] board could not be read ({e}): no Auto-Dropped rows this run")
+        return {"added": 0, "skipped": 0}
 
     added = 0
     skipped = 0
