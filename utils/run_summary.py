@@ -49,6 +49,7 @@ def build_summary(
     stale_queries: list | None = None,
     suggested_queries: list | None = None,
     errors: list | None = None,
+    scoring: dict | None = None,
 ) -> dict:
     """Helper: assemble the summary dict from the per-run state."""
     from notion_sync.feedback import PIPELINE
@@ -81,4 +82,5 @@ def build_summary(
         "stale_queries": stale_queries or [],
         "suggested_queries": suggested_queries or [],
         "errors": errors or [],
+        "scoring": scoring or {},
     }

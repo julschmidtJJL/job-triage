@@ -20,6 +20,10 @@ on:
         description: 'Only draft cover letters for Apply rows that have none yet (no scraping)'
         type: boolean
         default: false
+      scoring_fail_after:
+        description: 'Dry-run test only: Claude scoring fails from batch N+1 on (empty = off; ignored in real runs)'
+        type: string
+        default: ''
 
 jobs:
   run-pipeline:
@@ -89,6 +93,7 @@ jobs:
           MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           SEND_REPORT: ${{ inputs.send_report }}
+          SCORING_FAIL_AFTER_BATCHES: ${{ inputs.scoring_fail_after }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             python main.py --dry-run

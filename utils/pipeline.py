@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -429,6 +430,48 @@ def _apply_result(job: dict, result: JobScore, profile_text: str = "") -> None:
     job["unmet_requirements"] = unmet
     job["tool_gaps"] = tool_gaps
     job["scoring_method"] = "claude"
+    # What this call decided, so a later run whose call fails falls back to
+    # it instead of to the keyword prefilter (a failed batch once put
+    # keyword scores of 100 on the board).
+    job["last_claude"] = {k: job[k] for k in ("relevance_score", *CLAUDE_FIELDS) if k in job}
+    job["scored_this_run"] = True
+
+
+# Every key _apply_result writes besides relevance_score. Tier 1 clears them,
+# so a held-over job never shows last run's Claude fields next to today's
+# keyword score; a test checks this list against _apply_result.
+CLAUDE_FIELDS = (
+    "scoring_method", "ai_assessment", "situation_fit", "ai_matched_skills", "ad_language",
+    "contact_person", "seniority", "required_years", "candidate_years", "hard_requirements",
+    "requirements_flexible", "unmet_requirements", "tool_gaps",
+)
+# Per-run markers, never carried into the next run.
+RUN_MARKERS = ("scored_this_run", "score_from_previous_run")
+
+
+def _clear_claude_fields(job: dict) -> None:
+    for key in (*CLAUDE_FIELDS, *RUN_MARKERS):
+        job.pop(key, None)
+
+
+def _settle_unscored(jobs: list) -> None:
+    """Jobs Claude did not score in this call: a job with an earlier Claude
+    result gets that result back; any other job is "unscored" and must not
+    reach the board (main.py keeps it in the queue for the next run).
+    Assignment, never setdefault: setdefault kept a held job's stale "claude"
+    label next to its keyword score."""
+    for job in jobs:
+        if job.get("scored_this_run"):
+            continue
+        last = job.get("last_claude")
+        if last:
+            for key in CLAUDE_FIELDS:
+                job.pop(key, None)
+            job.update(last)
+            job["scoring_method"] = "claude"
+            job["score_from_previous_run"] = True
+        else:
+            job["scoring_method"] = "unscored"
 
 
 def _ad_facts_fallback(job: dict) -> None:
@@ -442,22 +485,59 @@ def _ad_facts_fallback(job: dict) -> None:
             job["required_years"] = years
 
 
+# Outcome of the last _score_jobs_claude call, for the [SCORING] line.
+_scoring_state = {"batches": 0, "failed": 0, "stopped_at": 0}
+AUTH_RETRY_SECONDS = 60
+RETRY_SECONDS = 10
+_sleep = time.sleep  # tests replace it
+
+
+def scoring_stats() -> dict:
+    return dict(_scoring_state)
+
+
+def _is_auth_error(e: Exception) -> bool:
+    """The API refused the key (seen as "credential validation failed" for
+    half a minute, then the same key worked again)."""
+    return (isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError))
+            or "credential" in str(e).lower())
+
+
+def _forced_failure(batch_no: int) -> None:
+    """Test hook for dry runs (main.py drops it from real runs): every batch
+    from number SCORING_FAIL_AFTER_BATCHES + 1 on fails."""
+    raw = os.environ.get("SCORING_FAIL_AFTER_BATCHES", "").strip()
+    if raw.isdigit() and batch_no > int(raw):
+        raise RuntimeError(f"forced failure (SCORING_FAIL_AFTER_BATCHES={raw})")
+
+
 def _score_jobs_claude(jobs: list, profile_text: str) -> list:
-    """Tier 2: score jobs against the fit profile in batches of 8. Jobs keep
-    their Tier-1 score if a batch fails."""
+    """Tier 2: score jobs against the fit profile in batches of 8.
+
+    A failed batch is retried once (on top of the SDK's own retries for 429
+    and 5xx). If the API refuses the key twice, no further calls are made
+    this run. Every job Claude did not score in this call is settled by
+    _settle_unscored: its earlier Claude result if it has one, otherwise
+    "unscored", never its keyword score."""
+    _scoring_state.update(batches=0, failed=0, stopped_at=0)
+    for job in jobs:
+        for key in RUN_MARKERS:
+            job.pop(key, None)
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         print("[WARN] ANTHROPIC_API_KEY missing — Claude scoring skipped")
         for job in jobs:
             _attach_full_ad(job)
-            job["scoring_method"] = "keyword_fallback"
+        _settle_unscored(jobs)
         return jobs
 
     client = anthropic.Anthropic(api_key=api_key)
     system = _SCORING_SYSTEM.format(profile=profile_text)
     batch_size = 8
+    total = (len(jobs) + batch_size - 1) // batch_size
+    _scoring_state["batches"] = total
 
-    for start in range(0, len(jobs), batch_size):
+    for batch_no, start in enumerate(range(0, len(jobs), batch_size), 1):
         batch = jobs[start: start + batch_size]
 
         # fetch full JDs and assign temp IDs
@@ -476,29 +556,48 @@ def _score_jobs_claude(jobs: list, profile_text: str) -> list:
                 "description": job.get("description", ""),
             })
 
-        try:
-            response = client.messages.parse(
-                model=scoring_model(),
-                max_tokens=16000,
-                output_config={"effort": "medium"},
-                system=system,
-                messages=[{"role": "user", "content": json.dumps(batch_input, ensure_ascii=False)}],
-                output_format=ScoreBatch,
-            )
-            parsed = response.parsed_output
-            if parsed is None:
-                raise ValueError(f"no parsed output (stop_reason={response.stop_reason})")
-            for result in parsed.results:
-                idx = id_map.get(result.id)
-                if idx is None:
-                    continue
-                _apply_result(batch[idx], result, profile_text)
-            print(f"[OK] Claude scoring: {len(parsed.results)} jobs scored")
-        except Exception as e:
-            print(f"[WARN] Claude batch scoring failed — keeping Tier-1 scores: {e}")
-            for job in batch:
-                job.setdefault("scoring_method", "keyword_fallback")
+        error = None
+        for attempt in (1, 2):
+            try:
+                _forced_failure(batch_no)
+                response = client.messages.parse(
+                    model=scoring_model(),
+                    max_tokens=16000,
+                    output_config={"effort": "medium"},
+                    system=system,
+                    messages=[{"role": "user", "content": json.dumps(batch_input, ensure_ascii=False)}],
+                    output_format=ScoreBatch,
+                )
+                parsed = response.parsed_output
+                if parsed is None:
+                    raise ValueError(f"no parsed output (stop_reason={response.stop_reason})")
+                for result in parsed.results:
+                    idx = id_map.get(result.id)
+                    if idx is None:
+                        continue
+                    _apply_result(batch[idx], result, profile_text)
+                missing = sum(1 for job in batch if not job.get("scored_this_run"))
+                note = f" ({missing} missing from the answer, not scored)" if missing else ""
+                print(f"[OK] Claude scoring: {len(batch) - missing} jobs scored{note}")
+                error = None
+                break
+            except Exception as e:
+                error = e
+                if attempt == 1:
+                    wait = AUTH_RETRY_SECONDS if _is_auth_error(e) else RETRY_SECONDS
+                    print(f"[WARN] Claude batch {batch_no} of {total} failed, retrying in {wait} s: {e}")
+                    _sleep(wait)
+        if error is not None:
+            _scoring_state["failed"] += 1
+            print(f"[WARN] Claude batch {batch_no} of {total} failed twice, not scored this run: {error}")
+            if _is_auth_error(error):
+                _scoring_state["stopped_at"] = batch_no
+                left = sum(1 for job in jobs if not job.get("scored_this_run"))
+                print(f"[SCORING] API refused the key twice at batch {batch_no} of {total}: "
+                      f"stopped, {left} jobs not scored this run")
+                break
 
+    _settle_unscored(jobs)
     return jobs
 
 
@@ -523,8 +622,11 @@ def score_jobs(
     if profile_text is None:
         profile_text = load_profile_text()
 
-    # Tier 1: role-term prefilter
+    # Tier 1: role-term prefilter. A held-over job arrives with the Claude
+    # fields of the run that scored it; they go, so nothing stale sits next
+    # to today's score. last_claude stays as the fallback (_settle_unscored).
     for job in jobs:
+        _clear_claude_fields(job)
         title_hits = matched_role_terms(job.get("title", ""), role_terms)
         desc_hits = matched_role_terms(job.get("description", ""), role_terms)
         score = min(len(title_hits) * 40, 80) + min(len(desc_hits) * 10, 20)

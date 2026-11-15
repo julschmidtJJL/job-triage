@@ -87,3 +87,22 @@ def merge_with_fresh(holdover: list, fresh_jobs: list) -> list:
     fresh_urls = {j.get("url") for j in fresh_jobs if j.get("url")}
     surviving_holdover = [j for j in holdover if j.get("url") and j.get("url") not in fresh_urls]
     return fresh_jobs + surviving_holdover
+
+
+UNSCORED_MAX_RUNS = 3
+
+
+def carry_unscored(unscored: list) -> tuple[list, list]:
+    """Jobs Claude could not score this run go back into the queue, never to
+    the board: (retry, given_up). Their own counter, unscored_runs, so "missed
+    the top-N" (holdover_runs) and "Claude never saw it" don't share one
+    expiry. After UNSCORED_MAX_RUNS runs without a score the caller logs
+    them by name."""
+    retry, given_up = [], []
+    for job in unscored:
+        runs = job.get("unscored_runs", 0) + 1
+        if runs >= UNSCORED_MAX_RUNS:
+            given_up.append(job)
+            continue
+        retry.append({**job, "unscored_runs": runs})
+    return retry, given_up

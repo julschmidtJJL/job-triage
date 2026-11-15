@@ -17,8 +17,13 @@ from scrapers.google_jobs import scrape_google_jobs
 from scrapers.green_jobs import scrape_green_jobs
 from scrapers.hamburg_karriere import scrape_hamburg_karriere
 from utils.feedback_features import build_feature_index
-from utils.holdover import load_holdover, merge_with_fresh, save_holdover, split_top_n_and_holdover, top_n_from_env
-from utils.pipeline import deduplicate, min_notion_score, score_jobs, score_threshold, scoring_model, _deduplicate_cross_platform
+from utils.holdover import (
+    carry_unscored, load_holdover, merge_with_fresh, save_holdover, split_top_n_and_holdover, top_n_from_env,
+)
+from utils.pipeline import (
+    deduplicate, min_notion_score, score_jobs, score_threshold, scoring_model, scoring_stats,
+    _deduplicate_cross_platform,
+)
 from utils.profile import active_queries, load_profile_text, load_search_config
 from utils.query_stats import (
     format_scoreboard, load_stats, record_run, save_stats, scoreboard, stale_queries, suggest_queries, tag_jobs,
@@ -155,6 +160,44 @@ def _send_weekly_report(stats: dict, history, config: dict, stale: list, suggest
         print(f"[WARN] Weekly report not sent: {info}")
 
 
+OUTAGE_SHARE = 0.5  # more unscored than this: write nothing, fail the run
+
+
+def route_scored(scored_jobs: list, profile_text: str, *, threshold: int, min_score: int, top_n: int) -> dict:
+    """Split one run's scored jobs into board rows and the queue.
+
+    With a fit profile only Claude-scored jobs can reach the board, whatever
+    MIN_NOTION_SCORE and CLAUDE_SCORE_THRESHOLD are set to. Jobs Claude was
+    meant to score but didn't go back into the queue (carry_unscored). If
+    more than half of them went unscored, "outage" is set: the caller writes
+    nothing and fails the run, so the next run redoes the whole day."""
+    tier2 = [j for j in scored_jobs if j.get("prefilter_score", 0) >= threshold]
+    unscored = [j for j in scored_jobs if j.get("scoring_method") == "unscored"]
+    for job in scored_jobs:
+        if job.get("scored_this_run"):
+            job.pop("unscored_runs", None)
+    if profile_text:
+        candidates = [j for j in scored_jobs if j.get("scoring_method") == "claude"]
+    else:
+        candidates = scored_jobs
+    eligible = [j for j in candidates if j.get("relevance_score", 0) >= min_score]
+    top, holdover, expired = split_top_n_and_holdover(eligible, top_n=top_n)
+    retry, given_up = carry_unscored(unscored)
+    outage = bool(profile_text and tier2 and len(unscored) > OUTAGE_SHARE * len(tier2))
+    return {"tier2": tier2, "unscored": unscored, "eligible": eligible, "top": top, "holdover": holdover,
+            "expired": expired, "retry": retry, "given_up": given_up, "outage": outage}
+
+
+def format_scoring(scored_jobs: list, unscored: int, stats: dict) -> str:
+    this_run = sum(1 for j in scored_jobs if j.get("scored_this_run"))
+    previous = sum(1 for j in scored_jobs if j.get("score_from_previous_run"))
+    line = (f"[SCORING] claude {this_run + previous} (this run {this_run}, previous run {previous}) | "
+            f"unscored {unscored} | batches failed {stats.get('failed', 0)} of {stats.get('batches', 0)}")
+    if stats.get("stopped_at"):
+        line += f" | stopped at batch {stats['stopped_at']}"
+    return line
+
+
 def run_failures(scored_jobs: list, profile_text: str, threshold: int, sync_result: dict | None) -> list[str]:
     """Reasons this run must count as failed. A run that scraped fine but
     could not score or deliver anything is not a success: it would mark every
@@ -222,6 +265,9 @@ def run_pipeline(dry_run: bool = False):
     if not profile_text:
         print("[WARN] No fit profile found (FIT_PROFILE or profile/profile.md) — scoring falls back to role terms")
 
+    if not dry_run and os.environ.pop("SCORING_FAIL_AFTER_BATCHES", None):
+        print("[WARN] SCORING_FAIL_AFTER_BATCHES is a dry-run test hook: ignored in a real run")
+
     print(f"[INFO] Starting pipeline with {len(queries)} queries...")
     log.info("[INFO] %d queries loaded", len(queries))
 
@@ -284,16 +330,29 @@ def run_pipeline(dry_run: bool = False):
 
     # Step 9: minimum score, then top-N cap + holdover update. Jobs below the
     # minimum are dropped here; they would only fill the board (or the queue).
+    # Only Claude-scored jobs reach the board; unscored ones wait in the queue.
     min_score = min_notion_score()
-    eligible = [j for j in scored_jobs if j.get("relevance_score", 0) >= min_score]
-    print(f"[CAP] {len(scored_jobs) - len(eligible)} jobs below the minimum score of {min_score} dropped")
     top_n = top_n_from_env()
-    top_jobs, new_holdover, expired = split_top_n_and_holdover(eligible, top_n=top_n)
+    routed = route_scored(scored_jobs, profile_text, threshold=score_threshold(), min_score=min_score, top_n=top_n)
+    eligible, top_jobs, expired = routed["eligible"], routed["top"], routed["expired"]
+    unscored_retry = routed["retry"]
+    new_holdover = routed["holdover"] + unscored_retry
     save_holdover(new_holdover)
+    print(format_scoring(scored_jobs, len(routed["unscored"]), scoring_stats()))
+    if routed["given_up"]:
+        names = ", ".join(f"{j.get('title', '')} @ {j.get('company', '')}" for j in routed["given_up"])
+        print(f"[SCORING] gave up on {len(routed['given_up'])} jobs after 3 runs without a Claude score: {names}")
+    print(f"[CAP] {len(scored_jobs) - len(eligible) - len(routed['unscored'])} jobs below the minimum score "
+          f"of {min_score} dropped")
     if expired:
         print(f"[INFO] {len(expired)} jobs dropped after 3 runs without making the top-N cut")
         log.info("[FEEDBACK] holdover expired: %d jobs", len(expired))
-    print(f"[CAP] Top-N={top_n}: {len(top_jobs)} jobs for the board, {len(new_holdover)} in holdover")
+    print(f"[CAP] Top-N={top_n}: {len(top_jobs)} jobs for the board, {len(routed['holdover'])} in holdover"
+          f" + {len(unscored_retry)} unscored for the next run")
+    outage = routed["outage"]
+    if outage:
+        print(f"[SCORING] more than half unscored ({len(routed['unscored'])} of {len(routed['tier2'])}): "
+              f"nothing written, run failed so the whole day is retried")
 
     output_file = DATA_DIR / f"new_jobs_{date.today()}.json"
     DATA_DIR.mkdir(exist_ok=True)
@@ -312,7 +371,13 @@ def run_pipeline(dry_run: bool = False):
     target = board_label()
     if dry_run:
         print(f"[DRY-RUN] {target} upload skipped")
+        all_claude = all(j.get("scoring_method") == "claude" for j in top_jobs) if profile_text else True
+        print(f"[DRY-RUN] top for the board: {len(top_jobs)}, all claude: {'yes' if all_claude else 'NO'} | "
+              f"queue: {len(routed['holdover'])} held + {len(unscored_retry)} unscored"
+              + (" | outage: a real run would write nothing and fail" if outage else ""))
         log.info("[INFO] Dry run: %s upload skipped", target)
+    elif outage:
+        log.error("[SCORING] outage: nothing written to the board")
     else:
         # Step 10: sync top-N to the board as New
         sync_result = sync_jobs(top_jobs)
@@ -361,6 +426,9 @@ def run_pipeline(dry_run: bool = False):
         _send_weekly_report(stats, history, config, stale, suggested, dry_run)
 
     failures = run_failures(scored_jobs, profile_text, score_threshold(), sync_result)
+    if outage:
+        failures.append(f"Claude could not score {len(routed['unscored'])} of {len(routed['tier2'])} jobs: "
+                        f"nothing written")
 
     # Step 14: per-run observability summary
     summary = build_summary(
@@ -376,6 +444,7 @@ def run_pipeline(dry_run: bool = False):
         stale_queries=stale,
         suggested_queries=suggested,
         errors=failures,
+        scoring={**scoring_stats(), "unscored": len(routed["unscored"]), "outage": outage},
     )
     summary_path = write_run_summary(summary)
     log.info("[FEEDBACK] run summary written: %s", summary_path)
